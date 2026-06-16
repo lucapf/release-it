@@ -1,0 +1,30 @@
+backend:
+  image: docker.io/library/releaseit-backend:latest
+  # Use locally-loaded image (e.g. `minikube image load`) instead of pulling
+  # from a remote registry. Set to Always for real registries.
+  pullPolicy: IfNotPresent
+  replicas: 1
+  solutionEnabled: true
+  # JWT resource-server config. Point at releaseit-auth or any OIDC engine.
+  jwt:
+    issuer: "http://releaseit-auth"
+    audience: "releaseit"
+    jwksUrl: "http://releaseit-auth:8001/.well-known/jwks.json"
+    roleClaim: "roles"
+
+frontend:
+  image: docker.io/library/releaseit-frontend:latest
+  pullPolicy: IfNotPresent
+  replicas: 1
+
+postgres:
+  image: postgres:16-alpine
+  user: releaseit
+  password: releaseit
+  database: releaseit
+  storage: 1Gi
+
+ingress:
+  enabled: true
+  className: nginx
+  host: releaseit.local

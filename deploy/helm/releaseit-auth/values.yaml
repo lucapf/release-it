@@ -1,0 +1,17 @@
+auth:
+  image: releaseit-auth:latest
+  pullPolicy: IfNotPresent
+  replicas: 1
+  issuer: "http://releaseit-auth"
+  audience: "releaseit"
+  # Mount a stable RS256 private key in production (PEM). Empty = ephemeral dev key.
+  privateKeyPem: ""
+  bootstrapAdmin:
+    username: admin
+    password: admin
+postgres:
+  image: postgres:16-alpine
+  user: auth
+  password: auth
+  database: auth
+  storage: 1Gi

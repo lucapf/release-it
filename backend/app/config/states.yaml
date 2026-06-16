@@ -1,0 +1,18 @@
+# Release state graph (acyclic). Position defines the score / ordering.
+# A state with no transitions is final. See docs/release-it.md "Release State".
+State:
+  - name: Draft
+    transitions:
+      - name: Ready
+        state: 'In QA'
+      - name: Cancel
+        state: Cancelled
+  - name: 'In QA'
+    transitions:
+      - name: Approve
+        state: Approved
+      - name: Reject
+        state: Rejected
+  - name: Cancelled
+  - name: Rejected
+  - name: Approved

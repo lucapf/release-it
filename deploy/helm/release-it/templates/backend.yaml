@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: releaseit-backend
+spec:
+  selector: { app: releaseit-backend }
+  ports: [{ port: 8000, targetPort: 8000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: releaseit-backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector: { matchLabels: { app: releaseit-backend } }
+  template:
+    metadata:
+      labels: { app: releaseit-backend }
+    spec:
+      containers:
+        - name: backend
+          image: {{ .Values.backend.image }}
+          imagePullPolicy: {{ .Values.backend.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@releaseit-db:5432/{{ .Values.postgres.database }}"
+            - { name: SOLUTION_ENABLED, value: {{ .Values.backend.solutionEnabled | quote }} }
+            - { name: JWT_ISSUER, value: {{ .Values.backend.jwt.issuer | quote }} }
+            - { name: JWT_AUDIENCE, value: {{ .Values.backend.jwt.audience | quote }} }
+            - { name: JWT_JWKS_URL, value: {{ .Values.backend.jwt.jwksUrl | quote }} }
+            - { name: JWT_ROLE_CLAIM, value: {{ .Values.backend.jwt.roleClaim | quote }} }
+          ports: [{ containerPort: 8000 }]
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }

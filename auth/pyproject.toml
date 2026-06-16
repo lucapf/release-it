@@ -1,0 +1,27 @@
+[project]
+name = "releaseit-auth"
+version = "0.1.0"
+description = "ReleaseIT default JWT/OIDC auth + user-management service"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "psycopg[binary,pool]>=3.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlparse>=0.5",
+    "bcrypt>=4.1",
+    "pyjwt[crypto]>=2.9",
+    "cryptography>=42.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

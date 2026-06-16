@@ -1,0 +1,54 @@
+# Local dev stack: backend + auth + frontend + two Postgres databases.
+# The auth service and the backend each own a separate database.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: releaseit
+      POSTGRES_PASSWORD: releaseit
+      POSTGRES_DB: releaseit
+    ports: ["5432:5432"]
+    volumes: ["db_data:/var/lib/postgresql/data"]
+
+  auth-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: auth
+      POSTGRES_PASSWORD: auth
+      POSTGRES_DB: auth
+    ports: ["5433:5432"]
+    volumes: ["auth_db_data:/var/lib/postgresql/data"]
+
+  auth:
+    build: ../auth
+    image: releaseit-auth:latest
+    environment:
+      AUTH_DATABASE_URL: postgresql://auth:auth@auth-db:5432/auth
+      AUTH_ISSUER: http://localhost:8001
+      AUTH_AUDIENCE: releaseit
+    ports: ["8001:8001"]
+    depends_on: [auth-db]
+
+  backend:
+    build: ../backend
+    image: releaseit-backend:latest
+    environment:
+      DATABASE_URL: postgresql://releaseit:releaseit@db:5432/releaseit
+      SOLUTION_ENABLED: "true"
+      # Verify tokens issued by the auth service. The issuer claim equals what
+      # the browser sees (localhost), while JWKS is fetched over the internal network.
+      JWT_ISSUER: http://localhost:8001
+      JWT_AUDIENCE: releaseit
+      JWT_JWKS_URL: http://auth:8001/.well-known/jwks.json
+    ports: ["8000:8000"]
+    depends_on: [db, auth]
+
+  frontend:
+    build: ../frontend
+    image: releaseit-frontend:latest
+    ports: ["8080:80"]
+    depends_on: [backend, auth]
+
+volumes:
+  db_data:
+  auth_db_data:
