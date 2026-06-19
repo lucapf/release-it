@@ -1,13 +1,16 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import {
   ActionIcon,
   Alert,
+  Anchor,
   Badge,
   Button,
   Card,
   Group,
   Loader,
+  Modal,
   MultiSelect,
   PasswordInput,
   SegmentedControl,
@@ -21,7 +24,7 @@ import {
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { IconTrash } from "@tabler/icons-react";
+import { IconPencil, IconTrash } from "@tabler/icons-react";
 import {
   getConfig,
   updateConfig,
@@ -30,7 +33,11 @@ import {
   listCheckTemplates,
   addCheckTemplate,
   deleteCheckTemplate,
+  getOverview,
+  updateProduct,
+  deleteProduct,
   ConfigUpdate,
+  ProductOverview,
   TransitionRoleUpdate,
   ROLES,
   Phase,
@@ -492,7 +499,180 @@ function CheckTemplatesSection({ canEdit }: { canEdit: boolean }) {
   );
 }
 
+// --- Projects: per-project settings + lifecycle ----------------------------
+function EditProjectModal({
+  project,
+  onClose,
+}: {
+  project: ProductOverview | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [name, setName] = useState("");
+  const [repo, setRepo] = useState("");
+  useEffect(() => {
+    if (project) {
+      setName(project.name);
+      setRepo(project.tracker_repo);
+    }
+  }, [project]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      updateProduct(project!.id, { name: name.trim(), tracker_repo: repo.trim() }),
+    onSuccess: (p) => {
+      qc.setQueryData(["product", p.id], p);
+      qc.invalidateQueries({ queryKey: ["overview"] });
+      notifications.show({ message: "Project updated", color: "teal" });
+      onClose();
+    },
+    onError: (e: any) => notifyApiError(e, "Could not update project"),
+  });
+
+  return (
+    <Modal opened={!!project} onClose={onClose} title="Edit project" size="md">
+      <Stack gap="md">
+        <TextInput
+          label="Project name"
+          data-autofocus
+          value={name}
+          onChange={(e) => setName(e.currentTarget.value)}
+        />
+        <TextInput
+          label="Issue tracker project"
+          description="GitHub owner/repo (or tracker project key) this project's issues live in"
+          placeholder="owner/repo"
+          value={repo}
+          onChange={(e) => setRepo(e.currentTarget.value)}
+        />
+        <Group justify="flex-end">
+          <Button variant="default" onClick={onClose}>Cancel</Button>
+          <Button disabled={!name.trim()} loading={save.isPending} onClick={() => save.mutate()}>
+            Save changes
+          </Button>
+        </Group>
+      </Stack>
+    </Modal>
+  );
+}
+
+function DeleteProjectModal({
+  project,
+  onClose,
+}: {
+  project: ProductOverview | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const del = useMutation({
+    mutationFn: () => deleteProduct(project!.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["overview"] });
+      notifications.show({ message: "Project deleted", color: "teal" });
+      onClose();
+    },
+    onError: (e: any) => notifyApiError(e, "Could not delete project"),
+  });
+
+  return (
+    <Modal opened={!!project} onClose={onClose} title="Delete project" size="md">
+      <Stack gap="md">
+        <Alert color="red" variant="light">
+          This permanently deletes <b>{project?.name}</b> and its{" "}
+          {project?.release_count ?? 0} release(s), including all checks, documents
+          and synced issues. This cannot be undone.
+        </Alert>
+        <Group justify="flex-end">
+          <Button variant="default" onClick={onClose}>Cancel</Button>
+          <Button color="red" loading={del.isPending} onClick={() => del.mutate()}>
+            Delete project
+          </Button>
+        </Group>
+      </Stack>
+    </Modal>
+  );
+}
+
+function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: boolean }) {
+  const { data: projects = [], isLoading } = useQuery({
+    queryKey: ["overview"],
+    queryFn: getOverview,
+  });
+  const [editing, setEditing] = useState<ProductOverview | null>(null);
+  const [deleting, setDeleting] = useState<ProductOverview | null>(null);
+
+  return (
+    <Card withBorder radius="md" padding="lg">
+      <Title order={4} mb={4}>Projects</Title>
+      <Text c="dimmed" size="sm" mb="md">
+        Manage each project's standard configuration — its name and the issue-tracker
+        project its issues are synced from — or remove a project.
+      </Text>
+
+      {isLoading ? (
+        <Loader />
+      ) : projects.length === 0 ? (
+        <Text c="dimmed" size="sm">No projects yet.</Text>
+      ) : (
+        <Table.ScrollContainer minWidth={520}>
+          <Table verticalSpacing="sm" highlightOnHover>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Project</Table.Th>
+                <Table.Th>Issue tracker project</Table.Th>
+                <Table.Th w={90}>Releases</Table.Th>
+                {(canEdit || canDelete) && <Table.Th w={90} />}
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {projects.map((p) => (
+                <Table.Tr key={p.id}>
+                  <Table.Td fw={600}>
+                    <Anchor component={Link} to={`/products/${p.id}`}>{p.name}</Anchor>
+                  </Table.Td>
+                  <Table.Td>
+                    {p.tracker_repo ? (
+                      <Badge variant="light" color="gray" style={{ textTransform: "none" }}>
+                        {p.tracker_repo}
+                      </Badge>
+                    ) : (
+                      <Text size="sm" c="dimmed">— not set —</Text>
+                    )}
+                  </Table.Td>
+                  <Table.Td>{p.release_count}</Table.Td>
+                  {(canEdit || canDelete) && (
+                    <Table.Td>
+                      <Group gap={4} wrap="nowrap">
+                        {canEdit && (
+                          <ActionIcon variant="subtle" color="gray" aria-label="Edit project"
+                            onClick={() => setEditing(p)}>
+                            <IconPencil size={16} />
+                          </ActionIcon>
+                        )}
+                        {canDelete && (
+                          <ActionIcon variant="subtle" color="red" aria-label="Delete project"
+                            onClick={() => setDeleting(p)}>
+                            <IconTrash size={16} />
+                          </ActionIcon>
+                        )}
+                      </Group>
+                    </Table.Td>
+                  )}
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
+      )}
+
+      <EditProjectModal project={editing} onClose={() => setEditing(null)} />
+      <DeleteProjectModal project={deleting} onClose={() => setDeleting(null)} />
+    </Card>
+  );
+}
+
 const SECTIONS = [
+  { id: "projects", label: "Projects" },
   { id: "checks", label: "Default checks" },
   { id: "workflow", label: "Release workflow" },
   { id: "tracker", label: "Issue tracker" },
@@ -516,7 +696,7 @@ export function ConfigurationPage() {
     <Stack gap="lg">
       <div>
         <Title order={2}>Configuration</Title>
-        <Text c="dimmed">Default checks, release workflow, issue tracker and LLM engine.</Text>
+        <Text c="dimmed">Projects, default checks, release workflow, issue tracker and LLM engine.</Text>
       </div>
 
       <Card withBorder radius="md" padding="sm">
@@ -535,6 +715,9 @@ export function ConfigurationPage() {
         </Group>
       </Card>
 
+      <div id="projects" style={anchorStyle}>
+        <ProjectsSection canEdit={canManageChecks} canDelete={isAdmin} />
+      </div>
       <div id="checks" style={anchorStyle}>
         <CheckTemplatesSection canEdit={canManageChecks} />
       </div>

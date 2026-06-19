@@ -31,16 +31,32 @@ def list_all(conn: psycopg.Connection) -> list[dict]:
 
 
 def update(
-    conn: psycopg.Connection, product_id: int, tracker_repo: str
+    conn: psycopg.Connection,
+    product_id: int,
+    *,
+    name: str | None = None,
+    tracker_repo: str | None = None,
 ) -> dict | None:
-    """Update the product's tracker project binding (GitHub owner/repo)."""
+    """Partially update a product's editable settings (name and/or tracker
+    project). Only the provided fields are written."""
+    sets: list[str] = []
+    params: list = []
+    if name is not None:
+        sets.append("name = %s")
+        params.append(name)
+    if tracker_repo is not None:
+        sets.append("tracker_repo = %s")
+        params.append(tracker_repo)
+    if not sets:
+        return get(conn, product_id)
+    params.append(product_id)
     return conn.execute(
-        """
-        UPDATE product SET tracker_repo = %s
+        f"""
+        UPDATE product SET {', '.join(sets)}
         WHERE id = %s
         RETURNING id, name, solution_id, tracker_repo, created_at
         """,
-        (tracker_repo, product_id),
+        params,
     ).fetchone()
 
 

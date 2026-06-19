@@ -272,7 +272,7 @@ function RepoBinding({ product, canEdit }: { product: Product; canEdit: boolean 
   useEffect(() => setRepo(product.tracker_repo), [product.tracker_repo]);
 
   const save = useMutation({
-    mutationFn: () => updateProduct(product.id, repo.trim()),
+    mutationFn: () => updateProduct(product.id, { tracker_repo: repo.trim() }),
     onSuccess: (p) => {
       qc.setQueryData(["product", product.id], p);
       qc.invalidateQueries({ queryKey: ["overview"] });

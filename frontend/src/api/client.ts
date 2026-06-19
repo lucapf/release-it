@@ -144,8 +144,12 @@ export const getProduct = (productId: number) =>
   api.get<Product>(`/api/v1/product/${productId}`).then((r) => r.data);
 export const createProduct = (name: string) =>
   api.post<Product>("/api/v1/product", { name }).then((r) => r.data);
-export const updateProduct = (productId: number, tracker_repo: string) =>
-  api.patch<Product>(`/api/v1/product/${productId}`, { tracker_repo }).then((r) => r.data);
+export const updateProduct = (
+  productId: number,
+  patch: { name?: string; tracker_repo?: string }
+) => api.patch<Product>(`/api/v1/product/${productId}`, patch).then((r) => r.data);
+export const deleteProduct = (productId: number) =>
+  api.delete(`/api/v1/product/${productId}`).then((r) => r.data);
 
 // --- Releases --------------------------------------------------------------
 export const listReleases = (productId: number) =>

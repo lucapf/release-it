@@ -18,8 +18,10 @@ class ProductCreate(BaseModel):
 
 
 class ProductUpdate(BaseModel):
-    """Editable product settings. Currently just the tracker project binding."""
-    tracker_repo: str = ""
+    """Editable product settings. Only the supplied fields are changed (a field
+    left as ``None`` is kept as-is)."""
+    name: str | None = None
+    tracker_repo: str | None = None
 
 
 class Product(BaseModel):

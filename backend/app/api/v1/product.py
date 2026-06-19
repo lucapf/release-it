@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import psycopg
+from psycopg import errors as pg_errors
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.jwt_verify import (
@@ -55,11 +56,20 @@ def get_product(product_id: int, conn: psycopg.Connection = Depends(get_conn)):
 def update_product(
     product_id: int, body: ProductUpdate, conn: psycopg.Connection = Depends(get_conn)
 ):
-    """Update the product's issue-tracker project (e.g. the GitHub repository)."""
-    row = repo.update(conn, product_id, body.tracker_repo.strip())
-    if row is None:
+    """Update a product's editable settings: its name and/or its issue-tracker
+    project (e.g. the GitHub repository). Omitted fields are left unchanged."""
+    if repo.get(conn, product_id) is None:
         raise HTTPException(404, "Product not found")
-    return row
+
+    name = body.name.strip() if body.name is not None else None
+    if name is not None and not name:
+        raise HTTPException(422, "Product name cannot be empty")
+    tracker_repo = body.tracker_repo.strip() if body.tracker_repo is not None else None
+
+    try:
+        return repo.update(conn, product_id, name=name, tracker_repo=tracker_repo)
+    except pg_errors.UniqueViolation as exc:
+        raise HTTPException(409, "A product with that name already exists") from exc
 
 
 @router.get("/{product_id}/releases", response_model=list[Release])
