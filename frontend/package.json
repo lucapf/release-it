@@ -12,6 +12,7 @@
     "@mantine/core": "^7.17.8",
     "@mantine/hooks": "^7.17.8",
     "@mantine/notifications": "^7.17.8",
+    "@tabler/icons-react": "^3.44.0",
     "@tanstack/react-query": "^5.51.0",
     "axios": "^1.7.0",
     "postcss-preset-mantine": "^1.18.0",

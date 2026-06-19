@@ -1,9 +1,9 @@
 import { FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  Alert,
   Button,
   Center,
-  Group,
   Paper,
   PasswordInput,
   Stack,
@@ -12,6 +12,7 @@ import {
   ThemeIcon,
   Title,
 } from "@mantine/core";
+import { IconAlertCircle, IconRocket } from "@tabler/icons-react";
 import { useAuth } from "../auth/AuthContext";
 
 export function LoginPage() {
@@ -38,14 +39,15 @@ export function LoginPage() {
 
   return (
     <Center mih="100vh" bg="var(--mantine-color-gray-1)">
-      <Paper withBorder shadow="md" p="xl" radius="md" w={360}>
+      <Paper withBorder shadow="md" p="xl" radius="lg" w={380}>
         <Stack gap="lg">
-          <Group gap="xs">
-            <ThemeIcon size="lg" variant="gradient" gradient={{ from: "indigo", to: "grape" }}>
-              🚀
+          <Stack gap={4} align="center">
+            <ThemeIcon size={52} radius="md" variant="gradient" gradient={{ from: "indigo", to: "grape" }}>
+              <IconRocket size={28} />
             </ThemeIcon>
-            <Title order={2}>ReleaseIT</Title>
-          </Group>
+            <Title order={2} mt="xs">ReleaseIT</Title>
+            <Text size="sm" c="dimmed">Sign in to the release management platform</Text>
+          </Stack>
           <form onSubmit={onSubmit}>
             <Stack gap="sm">
               <TextInput
@@ -59,7 +61,11 @@ export function LoginPage() {
                 value={password}
                 onChange={(e) => setPassword(e.currentTarget.value)}
               />
-              {error && <Text c="red" size="sm">{error}</Text>}
+              {error && (
+                <Alert color="red" variant="light" icon={<IconAlertCircle size={16} />} p="xs">
+                  {error}
+                </Alert>
+              )}
               <Button type="submit" fullWidth loading={loading} mt="xs">
                 Sign in
               </Button>

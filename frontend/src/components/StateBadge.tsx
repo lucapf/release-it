@@ -1,17 +1,20 @@
 import { Badge } from "@mantine/core";
+import { stateColor } from "../lib/status";
 
-// Map release-state names (states.yaml) to a consistent colour across the app.
-const STATE_COLORS: Record<string, string> = {
-  Draft: "gray",
-  "In QA": "yellow",
-  Approved: "teal",
-  Rejected: "red",
-  Cancelled: "dark",
-};
-
-export function StateBadge({ state }: { state: string }) {
+// Renders a release state with the app-wide colour mapping. `emphasis` makes the
+// chip solid — use it for the *current* state of the release in focus so it
+// stands out from the lighter, secondary state chips elsewhere on the page.
+export function StateBadge({
+  state,
+  emphasis = false,
+  size,
+}: {
+  state: string;
+  emphasis?: boolean;
+  size?: string;
+}) {
   return (
-    <Badge color={STATE_COLORS[state] ?? "blue"} variant="light">
+    <Badge color={stateColor(state)} variant={emphasis ? "filled" : "light"} size={size}>
       {state}
     </Badge>
   );
