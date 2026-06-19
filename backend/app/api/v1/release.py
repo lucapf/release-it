@@ -22,6 +22,7 @@ from app.repositories import config as config_repo
 from app.repositories import jira_issues as jira_repo
 from app.repositories import products as products_repo
 from app.repositories import releases as repo
+from app.repositories import sync_filters as filters_repo
 from app.services import appconfig
 from app.schemas.models import (
     ArtifactMeta,
@@ -34,6 +35,8 @@ from app.schemas.models import (
     JiraIssue,
     JiraSyncRequest,
     Release,
+    SyncFilter,
+    SyncFilterView,
     ReleaseCreate,
     ReleaseStatusSummary,
     RequiredDoc,
@@ -75,6 +78,60 @@ def _load(conn: psycopg.Connection, release_id: int) -> dict:
     return row
 
 
+def _compute_status(conn: psycopg.Connection, rel: dict) -> ReleaseStatusSummary:
+    """Aggregate a release's readiness: open (not-closed) tracker issues, the
+    required-documentation checklist, and outstanding checks. Single source of
+    truth for both the status endpoint and the transition guards."""
+    release_id = rel["id"]
+    # Any synced issue whose status is not a closed one (default: only "Done")
+    # counts as open — regardless of issue type.
+    closed = {s.lower() for s in _split(settings.closed_bug_statuses)}
+    issues = jira_repo.list_by_release(conn, release_id)
+    open_bugs = [i for i in issues if i["status"].lower() not in closed]
+
+    published = [d["name"].lower() for d in repo.list_documentation(conn, release_id)
+                 if not d["is_draft"]]
+    required = [
+        RequiredDoc(label=label, present=any(keyword in name for name in published))
+        for label, keyword in _parse_required_docs(settings.required_docs)
+    ]
+    missing = [d.label for d in required if not d.present]
+
+    checks = repo.list_checks(conn, release_id)
+    pending = sum(1 for c in checks if not c["done"])
+
+    return ReleaseStatusSummary(
+        release_id=release_id,
+        state=rel["state"],
+        open_bug_count=len(open_bugs),
+        open_bugs=open_bugs,
+        required_docs=required,
+        missing_docs=missing,
+        pending_checks=pending,
+        total_checks=len(checks),
+        is_ready=not open_bugs and not missing and pending == 0,
+    )
+
+
+def _unmet_requirements(requires: frozenset[str], status: ReleaseStatusSummary) -> list[str]:
+    """Human-readable reasons a guarded transition is blocked (empty = allowed).
+    Guard names mirror those declared in states.yaml `requires`."""
+    reasons: list[str] = []
+    if "no_open_issues" in requires and status.open_bug_count > 0:
+        reasons.append(
+            f"{status.open_bug_count} open issue(s) must be closed first"
+        )
+    if "docs_complete" in requires and status.missing_docs:
+        reasons.append(
+            f"missing required documentation: {', '.join(status.missing_docs)}"
+        )
+    if "checks_done" in requires and status.pending_checks > 0:
+        reasons.append(
+            f"{status.pending_checks} checklist item(s) still pending"
+        )
+    return reasons
+
+
 # --- Release CRUD ----------------------------------------------------------
 @router.post("", response_model=Release, status_code=201,
              dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
@@ -106,41 +163,21 @@ def get_release(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
     return _load(conn, release_id)
 
 
+@router.delete("/{release_id}", status_code=204,
+               dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+def delete_release(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
+    """Permanently delete a release and all its assets (checks, artifacts,
+    documents, synced issues). Cannot be undone."""
+    if not repo.delete(conn, release_id):
+        raise HTTPException(404, "Release not found")
+
+
 # --- Status summary & history ----------------------------------------------
 @router.get("/{release_id}/status", response_model=ReleaseStatusSummary)
 def release_status(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
     """Readiness overview for a release: open (not-closed) Jira issues, the
     required-documentation checklist, and outstanding checks."""
-    rel = _load(conn, release_id)
-
-    # Any synced issue whose status is not a closed one (default: only "Done")
-    # counts as open — regardless of issue type.
-    closed = {s.lower() for s in _split(settings.closed_bug_statuses)}
-    issues = jira_repo.list_by_release(conn, release_id)
-    open_bugs = [i for i in issues if i["status"].lower() not in closed]
-
-    published = [d["name"].lower() for d in repo.list_documentation(conn, release_id)
-                 if not d["is_draft"]]
-    required = [
-        RequiredDoc(label=label, present=any(keyword in name for name in published))
-        for label, keyword in _parse_required_docs(settings.required_docs)
-    ]
-    missing = [d.label for d in required if not d.present]
-
-    checks = repo.list_checks(conn, release_id)
-    pending = sum(1 for c in checks if not c["done"])
-
-    return ReleaseStatusSummary(
-        release_id=release_id,
-        state=rel["state"],
-        open_bug_count=len(open_bugs),
-        open_bugs=open_bugs,
-        required_docs=required,
-        missing_docs=missing,
-        pending_checks=pending,
-        total_checks=len(checks),
-        is_ready=not open_bugs and not missing and pending == 0,
-    )
+    return _compute_status(conn, _load(conn, release_id))
 
 
 @router.get("/{release_id}/history", response_model=list[AuditEntry])
@@ -181,6 +218,15 @@ def transition_release(
             403,
             f"Transition '{body.transition}' requires one of roles: "
             f"{', '.join(sorted(allowed_roles))}",
+        )
+
+    # Readiness guards declared in states.yaml (e.g. Approve needs all issues
+    # closed and the required docs present). Reject and Cancel stay unguarded.
+    unmet = _unmet_requirements(trans.requires, _compute_status(conn, rel))
+    if unmet:
+        raise HTTPException(
+            409,
+            f"Cannot '{body.transition}' release v{rel['version']}: " + "; ".join(unmet),
         )
 
     new_state = trans.target
@@ -360,8 +406,7 @@ def _product_repo(conn: psycopg.Connection, release: dict) -> str:
     return (product or {}).get("tracker_repo", "") or ""
 
 
-@router.post("/{release_id}/jira/sync", response_model=list[JiraIssue],
-             dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.post("/{release_id}/jira/sync", response_model=list[JiraIssue])
 def sync_jira(
     release_id: int,
     body: JiraSyncRequest,
@@ -402,6 +447,40 @@ def sync_jira(
 def list_jira_issues(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
     _load(conn, release_id)
     return jira_repo.list_by_release(conn, release_id)
+
+
+# --- Saved sync filter (any authenticated operator) ------------------------
+@router.get("/{release_id}/sync-filter", response_model=SyncFilterView | None)
+def get_sync_filter(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
+    """The persisted tracker filter for this release, or ``null`` if none."""
+    _load(conn, release_id)
+    row = filters_repo.get(conn, release_id)
+    if row is None:
+        return None
+    return SyncFilterView(
+        release_id=row["release_id"],
+        mode=row["filter_mode"],
+        value=row["filter_value"],
+        updated_at=row["updated_at"],
+    )
+
+
+@router.put("/{release_id}/sync-filter", response_model=SyncFilterView)
+def save_sync_filter(
+    release_id: int,
+    body: SyncFilter,
+    conn: psycopg.Connection = Depends(get_conn),
+    principal: Principal = Depends(current_principal),
+):
+    """Persist the tracker filter so it is applied automatically next time."""
+    _load(conn, release_id)
+    row = filters_repo.upsert(conn, release_id, body.mode, body.value)
+    return SyncFilterView(
+        release_id=row["release_id"],
+        mode=row["filter_mode"],
+        value=row["filter_value"],
+        updated_at=row["updated_at"],
+    )
 
 
 # --- Install pipeline (manual trigger) -------------------------------------

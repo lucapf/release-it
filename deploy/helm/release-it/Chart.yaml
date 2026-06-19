@@ -1,6 +1,25 @@
 apiVersion: v2
 name: release-it
-description: ReleaseIT backend + frontend + PostgreSQL
+description: ReleaseIT umbrella chart — deploys all services (db, auth, backend, frontend) in one release
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+
+# Each service is a local subchart. One `helm upgrade --install` brings up the
+# whole stack; override any service's values under its chart-name key (see
+# values.yaml). Run `helm dependency build` after changing these.
+dependencies:
+  # Shared infra (no source code of its own) stays alongside the umbrella.
+  - name: releaseit-db
+    version: "0.1.0"
+    repository: "file://../releaseit-db"
+  # Each service's chart lives in a `chart/` dir next to its source code.
+  - name: releaseit-auth
+    version: "0.1.0"
+    repository: "file://../../../auth/chart"
+  - name: releaseit-backend
+    version: "0.1.0"
+    repository: "file://../../../backend/chart"
+  - name: releaseit-frontend
+    version: "0.1.0"
+    repository: "file://../../../frontend/chart"

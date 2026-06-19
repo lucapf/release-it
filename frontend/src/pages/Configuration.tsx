@@ -24,125 +24,302 @@ import {
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { IconPencil, IconTrash } from "@tabler/icons-react";
+import {
+  IconArrowDown,
+  IconArrowUp,
+  IconDownload,
+  IconPencil,
+  IconPlus,
+  IconTrash,
+} from "@tabler/icons-react";
 import {
   getConfig,
   updateConfig,
   getWorkflow,
-  setTransitionRoles,
+  updateWorkflow,
+  exportWorkflowYaml,
   listCheckTemplates,
   addCheckTemplate,
   deleteCheckTemplate,
   getOverview,
   updateProduct,
   deleteProduct,
+  listReleases,
+  deleteRelease,
   ConfigUpdate,
   ProductOverview,
-  TransitionRoleUpdate,
+  Release,
+  WorkflowStateInput,
+  Workflow,
+  GUARDS,
   ROLES,
   Phase,
 } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { notifyApiError } from "../lib/errors";
 
-// --- Workflow: structure read-only, per-transition roles admin-editable ----
+// --- Workflow: full graph editor (states + transitions) + YAML export -------
+const toEditable = (wf: Workflow): WorkflowStateInput[] =>
+  [...wf.states]
+    .sort((a, b) => a.score - b.score)
+    .map((s) => ({
+      name: s.name,
+      transitions: s.transitions.map((t) => ({
+        name: t.name,
+        target: t.target,
+        roles: [...t.roles],
+        requires: [...t.requires],
+      })),
+    }));
+
+// Returns a human-readable error if the edited graph is invalid, else null.
+// Mirrors the backend validation so the admin gets feedback before saving.
+function validateGraph(states: WorkflowStateInput[]): string | null {
+  if (states.length === 0) return "Add at least one state.";
+  const names = states.map((s) => s.name.trim());
+  if (names.some((n) => !n)) return "Every state needs a name.";
+  if (new Set(names).size !== names.length) return "State names must be unique.";
+  const known = new Set(names);
+  for (const s of states) {
+    const seen = new Set<string>();
+    for (const t of s.transitions) {
+      const tn = t.name.trim();
+      if (!tn) return `A transition in “${s.name}” has no name.`;
+      if (seen.has(tn)) return `“${s.name}” has a duplicate transition “${tn}”.`;
+      seen.add(tn);
+      if (!known.has(t.target)) return `Transition “${tn}” targets an unknown state.`;
+    }
+  }
+  return null;
+}
+
+function downloadYaml(text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/x-yaml" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "states.yaml";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function WorkflowSection({ canEdit }: { canEdit: boolean }) {
   const qc = useQueryClient();
   const { data: workflow, isLoading } = useQuery({ queryKey: ["workflow"], queryFn: getWorkflow });
 
-  // Edited roles keyed by "<state>|<transition>"; seeded from the workflow.
-  const [roles, setRoles] = useState<Record<string, string[]>>({});
+  // The editable graph, seeded from the server and mutated locally until saved.
+  const [states, setStates] = useState<WorkflowStateInput[]>([]);
   useEffect(() => {
-    if (!workflow) return;
-    const seeded: Record<string, string[]> = {};
-    workflow.states.forEach((s) =>
-      s.transitions.forEach((t) => { seeded[`${s.name}|${t.name}`] = t.roles; })
-    );
-    setRoles(seeded);
+    if (workflow) setStates(toEditable(workflow));
   }, [workflow]);
 
+  // Immutable update of one state by index.
+  const patchState = (i: number, fn: (s: WorkflowStateInput) => WorkflowStateInput) =>
+    setStates((prev) => prev.map((s, idx) => (idx === i ? fn(s) : s)));
+  const patchTransition = (
+    si: number,
+    ti: number,
+    patch: Partial<WorkflowStateInput["transitions"][number]>,
+  ) =>
+    patchState(si, (s) => ({
+      ...s,
+      transitions: s.transitions.map((t, idx) => (idx === ti ? { ...t, ...patch } : t)),
+    }));
+
+  const moveState = (i: number, dir: -1 | 1) =>
+    setStates((prev) => {
+      const j = i + dir;
+      if (j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+
   const save = useMutation({
-    mutationFn: () => {
-      const overrides: TransitionRoleUpdate[] = [];
-      workflow?.states.forEach((s) =>
-        s.transitions.forEach((t) => {
-          const key = `${s.name}|${t.name}`;
-          overrides.push({ state: s.name, transition: t.name, roles: roles[key] ?? t.roles });
-        })
-      );
-      return setTransitionRoles(overrides);
+    mutationFn: () => updateWorkflow(states),
+    onSuccess: (wf) => {
+      qc.setQueryData(["workflow"], wf);
+      notifications.show({ message: "Workflow saved", color: "teal" });
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["workflow"] });
-      notifications.show({ message: "Transition roles updated", color: "teal" });
-    },
-    onError: (e: any) => notifyApiError(e, "Update failed"),
+    onError: (e: any) => notifyApiError(e, "Could not save workflow"),
+  });
+
+  const exportYaml = useMutation({
+    mutationFn: exportWorkflowYaml,
+    onSuccess: downloadYaml,
+    onError: (e: any) => notifyApiError(e, "Export failed"),
   });
 
   if (isLoading || !workflow) return <Loader />;
 
-  const hasEmpty = workflow.states.some((s) =>
-    s.transitions.some((t) => (roles[`${s.name}|${t.name}`] ?? t.roles).length === 0)
-  );
+  const error = validateGraph(states);
+  const stateOptions = states.map((s) => s.name).filter(Boolean);
 
   return (
     <Card withBorder radius="md" padding="lg">
       <Group justify="space-between" mb={4}>
         <Title order={4}>Release workflow</Title>
-        {canEdit && (
+        <Group gap="xs">
           <Button
             size="compact-sm"
-            loading={save.isPending}
-            disabled={hasEmpty}
-            onClick={() => save.mutate()}
+            variant="default"
+            leftSection={<IconDownload size={14} />}
+            loading={exportYaml.isPending}
+            onClick={() => exportYaml.mutate()}
           >
-            Save transition roles
+            Export YAML
           </Button>
-        )}
+          {canEdit && (
+            <Button
+              size="compact-sm"
+              loading={save.isPending}
+              disabled={!!error}
+              onClick={() => save.mutate()}
+            >
+              Save workflow
+            </Button>
+          )}
+        </Group>
       </Group>
       <Text c="dimmed" size="sm" mb="md">
-        State graph from <code>states.yaml</code> (structure is read-only). Initial state:{" "}
-        <b>{workflow.initial_state}</b>. {canEdit
-          ? "Choose which roles may perform each transition below."
-          : "Administrators can configure which roles may perform each transition."}
+        Database-backed state graph. The first state is the initial one
+        (<b>{states[0]?.name || "—"}</b>); a state with no transitions is final.{" "}
+        {canEdit
+          ? "Edit states, transitions, roles and readiness guards below."
+          : "Administrators can edit the workflow."} Use <b>Export YAML</b> to download a{" "}
+        <code>states.yaml</code>-compatible definition.
       </Text>
+
+      {canEdit && error && (
+        <Alert color="orange" variant="light" mb="md">{error}</Alert>
+      )}
+
       <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
-        {workflow.states.map((s) => (
-          <Card key={s.name} withBorder radius="md" padding="sm" bg="var(--mantine-color-gray-0)">
-            <Group justify="space-between">
-              <Text fw={700}>{s.name}</Text>
-              {s.is_final && <Badge size="sm" color="gray" variant="light">final</Badge>}
+        {states.map((s, si) => (
+          <Card key={si} withBorder radius="md" padding="sm" bg="var(--mantine-color-gray-0)">
+            <Group justify="space-between" wrap="nowrap" mb="xs">
+              <TextInput
+                value={s.name}
+                onChange={(e) => patchState(si, (st) => ({ ...st, name: e.currentTarget.value }))}
+                disabled={!canEdit}
+                size="xs"
+                placeholder="State name"
+                style={{ flex: 1 }}
+                rightSection={
+                  si === 0 ? (
+                    <Badge size="xs" color="blue" variant="light">initial</Badge>
+                  ) : s.transitions.length === 0 ? (
+                    <Badge size="xs" color="gray" variant="light">final</Badge>
+                  ) : null
+                }
+                rightSectionWidth={60}
+              />
+              {canEdit && (
+                <Group gap={2} wrap="nowrap">
+                  <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Move up"
+                    disabled={si === 0} onClick={() => moveState(si, -1)}>
+                    <IconArrowUp size={15} />
+                  </ActionIcon>
+                  <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Move down"
+                    disabled={si === states.length - 1} onClick={() => moveState(si, 1)}>
+                    <IconArrowDown size={15} />
+                  </ActionIcon>
+                  <ActionIcon variant="subtle" color="red" size="sm" aria-label="Delete state"
+                    onClick={() => setStates((prev) => prev.filter((_, idx) => idx !== si))}>
+                    <IconTrash size={15} />
+                  </ActionIcon>
+                </Group>
+              )}
             </Group>
-            <Stack gap="sm" mt="xs">
+
+            <Stack gap="sm">
               {s.transitions.length === 0 ? (
-                <Text size="xs" c="dimmed">No outgoing transitions.</Text>
+                <Text size="xs" c="dimmed">No outgoing transitions (final state).</Text>
               ) : (
-                s.transitions.map((t) => {
-                  const key = `${s.name}|${t.name}`;
-                  return (
-                    <div key={t.name}>
-                      <Group gap={6} wrap="nowrap" mb={2}>
-                        <Badge size="sm" variant="filled" color="indigo">{t.name}</Badge>
-                        <Text size="xs">→ {t.target}</Text>
-                      </Group>
-                      <MultiSelect
-                        data={ROLES}
-                        value={roles[key] ?? t.roles}
-                        onChange={(v) => setRoles((prev) => ({ ...prev, [key]: v }))}
+                s.transitions.map((t, ti) => (
+                  <Card key={ti} withBorder radius="sm" padding="xs">
+                    <Group gap={6} wrap="nowrap" mb={6}>
+                      <TextInput
+                        value={t.name}
+                        onChange={(e) => patchTransition(si, ti, { name: e.currentTarget.value })}
                         disabled={!canEdit}
                         size="xs"
-                        placeholder="Allowed roles"
-                        comboboxProps={{ withinPortal: true }}
-                        error={(roles[key] ?? t.roles).length === 0 ? "At least one role" : undefined}
+                        placeholder="Action"
+                        style={{ flex: 1 }}
                       />
-                    </div>
-                  );
-                })
+                      <Text size="xs" c="dimmed">→</Text>
+                      <Select
+                        data={stateOptions}
+                        value={t.target || null}
+                        onChange={(v) => patchTransition(si, ti, { target: v ?? "" })}
+                        disabled={!canEdit}
+                        size="xs"
+                        placeholder="Target"
+                        comboboxProps={{ withinPortal: true }}
+                        style={{ flex: 1 }}
+                        error={t.target && !stateOptions.includes(t.target) ? true : undefined}
+                      />
+                      {canEdit && (
+                        <ActionIcon variant="subtle" color="red" size="sm" aria-label="Delete transition"
+                          onClick={() => patchState(si, (st) => ({
+                            ...st,
+                            transitions: st.transitions.filter((_, idx) => idx !== ti),
+                          }))}>
+                          <IconTrash size={15} />
+                        </ActionIcon>
+                      )}
+                    </Group>
+                    <MultiSelect
+                      data={ROLES}
+                      value={t.roles}
+                      onChange={(v) => patchTransition(si, ti, { roles: v })}
+                      disabled={!canEdit}
+                      size="xs"
+                      label="Allowed roles"
+                      placeholder="Defaults if empty"
+                      comboboxProps={{ withinPortal: true }}
+                      mb={6}
+                    />
+                    <MultiSelect
+                      data={GUARDS}
+                      value={t.requires}
+                      onChange={(v) => patchTransition(si, ti, { requires: v })}
+                      disabled={!canEdit}
+                      size="xs"
+                      label="Readiness guards"
+                      placeholder="None"
+                      comboboxProps={{ withinPortal: true }}
+                    />
+                  </Card>
+                ))
+              )}
+              {canEdit && (
+                <Button
+                  size="compact-xs"
+                  variant="light"
+                  leftSection={<IconPlus size={13} />}
+                  onClick={() => patchState(si, (st) => ({
+                    ...st,
+                    transitions: [...st.transitions, { name: "", target: "", roles: [], requires: [] }],
+                  }))}
+                >
+                  Add transition
+                </Button>
               )}
             </Stack>
           </Card>
         ))}
       </SimpleGrid>
+
+      {canEdit && (
+        <Button
+          mt="md"
+          variant="light"
+          leftSection={<IconPlus size={15} />}
+          onClick={() => setStates((prev) => [...prev, { name: "", transitions: [] }])}
+        >
+          Add state
+        </Button>
+      )}
     </Card>
   );
 }
@@ -593,6 +770,95 @@ function DeleteProjectModal({
   );
 }
 
+// Lists a project's releases and lets a Release Manager / Administrator delete
+// any of them (with a per-row confirmation). Deleting a release removes all its
+// checks, documents and synced issues.
+function ManageReleasesModal({
+  project,
+  onClose,
+}: {
+  project: ProductOverview | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [confirmId, setConfirmId] = useState<number | null>(null);
+  const { data: releases = [], isLoading } = useQuery({
+    queryKey: ["product-releases", project?.id],
+    queryFn: () => listReleases(project!.id),
+    enabled: !!project,
+  });
+
+  const del = useMutation({
+    mutationFn: (id: number) => deleteRelease(id),
+    onSuccess: (_d, id) => {
+      setConfirmId((cur) => (cur === id ? null : cur));
+      qc.invalidateQueries({ queryKey: ["product-releases", project?.id] });
+      qc.invalidateQueries({ queryKey: ["overview"] });
+      qc.invalidateQueries({ queryKey: ["product", project?.id] });
+      notifications.show({ message: "Release deleted", color: "teal" });
+    },
+    onError: (e: any) => notifyApiError(e, "Could not delete release"),
+  });
+
+  return (
+    <Modal
+      opened={!!project}
+      onClose={onClose}
+      title={`Releases — ${project?.name ?? ""}`}
+      size="lg"
+    >
+      {isLoading ? (
+        <Loader />
+      ) : releases.length === 0 ? (
+        <Text c="dimmed" size="sm">This project has no releases.</Text>
+      ) : (
+        <Table verticalSpacing="sm">
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>Version</Table.Th>
+              <Table.Th>State</Table.Th>
+              <Table.Th w={180} />
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {releases.map((r: Release) => (
+              <Table.Tr key={r.id}>
+                <Table.Td fw={600}>{r.version}</Table.Td>
+                <Table.Td>
+                  <Badge variant="light" color="gray">{r.state}</Badge>
+                </Table.Td>
+                <Table.Td>
+                  {confirmId === r.id ? (
+                    <Group gap={6} wrap="nowrap" justify="flex-end">
+                      <Text size="xs" c="red">Delete?</Text>
+                      <Button size="compact-xs" color="red"
+                        loading={del.isPending && del.variables === r.id}
+                        onClick={() => del.mutate(r.id)}>
+                        Confirm
+                      </Button>
+                      <Button size="compact-xs" variant="default"
+                        onClick={() => setConfirmId(null)}>
+                        Cancel
+                      </Button>
+                    </Group>
+                  ) : (
+                    <Group justify="flex-end">
+                      <ActionIcon variant="subtle" color="red" aria-label="Delete release"
+                        onClick={() => setConfirmId(r.id)}>
+                        <IconTrash size={16} />
+                      </ActionIcon>
+                    </Group>
+                  )}
+                </Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      )}
+    </Modal>
+  );
+}
+
 function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: boolean }) {
   const { data: projects = [], isLoading } = useQuery({
     queryKey: ["overview"],
@@ -600,13 +866,16 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
   });
   const [editing, setEditing] = useState<ProductOverview | null>(null);
   const [deleting, setDeleting] = useState<ProductOverview | null>(null);
+  const [managing, setManaging] = useState<ProductOverview | null>(null);
 
   return (
     <Card withBorder radius="md" padding="lg">
       <Title order={4} mb={4}>Projects</Title>
       <Text c="dimmed" size="sm" mb="md">
         Manage each project's standard configuration — its name and the issue-tracker
-        project its issues are synced from — or remove a project.
+        project its issues are synced from — or remove a project. {canEdit
+          ? "Click a project's release count to manage and delete its releases."
+          : ""}
       </Text>
 
       {isLoading ? (
@@ -639,7 +908,15 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
                       <Text size="sm" c="dimmed">— not set —</Text>
                     )}
                   </Table.Td>
-                  <Table.Td>{p.release_count}</Table.Td>
+                  <Table.Td>
+                    {canEdit && p.release_count > 0 ? (
+                      <Anchor component="button" type="button" onClick={() => setManaging(p)}>
+                        {p.release_count}
+                      </Anchor>
+                    ) : (
+                      p.release_count
+                    )}
+                  </Table.Td>
                   {(canEdit || canDelete) && (
                     <Table.Td>
                       <Group gap={4} wrap="nowrap">
@@ -667,6 +944,7 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
 
       <EditProjectModal project={editing} onClose={() => setEditing(null)} />
       <DeleteProjectModal project={deleting} onClose={() => setDeleting(null)} />
+      <ManageReleasesModal project={managing} onClose={() => setManaging(null)} />
     </Card>
   );
 }

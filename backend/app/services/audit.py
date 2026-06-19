@@ -21,3 +21,19 @@ def record(
         """,
         (entity_type, entity_id, action, old_value, new_value, operator),
     )
+
+
+def list_for(
+    conn: psycopg.Connection, *, entity_type: str, entity_id: int
+) -> list[dict]:
+    """Return the audit trail for one entity, most recent first."""
+    return conn.execute(
+        """
+        SELECT id, entity_type, entity_id, action, old_value, new_value,
+               operator, created_at
+        FROM audit
+        WHERE entity_type = %s AND entity_id = %s
+        ORDER BY created_at DESC, id DESC
+        """,
+        (entity_type, entity_id),
+    ).fetchall()

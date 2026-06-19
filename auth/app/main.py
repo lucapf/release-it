@@ -18,15 +18,35 @@ from app.user_management import router as user_router
 from app import users_repo
 
 
+# Passwords too weak/guessable to ever seed an admin account with.
+_INSECURE_BOOTSTRAP_PASSWORDS = {"", "admin", "password", "changeme", "secret"}
+_MIN_BOOTSTRAP_PASSWORD_LEN = 12
+
+
 def _bootstrap_admin() -> None:
-    """Create a default Administrator on first run (no users yet)."""
+    """Create a default Administrator on first run (no users yet).
+
+    Fails closed: refuses to seed the admin with a missing or insecure password
+    so a fresh deployment can't be taken over with guessable credentials. Set a
+    strong AUTH_BOOTSTRAP_ADMIN_PASSWORD (>= 12 chars) before first run.
+    """
     with connection() as conn:
         if users_repo.count_users(conn) == 0:
+            password = settings.bootstrap_admin_password
+            if (
+                password.lower() in _INSECURE_BOOTSTRAP_PASSWORDS
+                or len(password) < _MIN_BOOTSTRAP_PASSWORD_LEN
+            ):
+                raise RuntimeError(
+                    "Refusing to bootstrap the admin user with a missing or "
+                    "insecure password. Set AUTH_BOOTSTRAP_ADMIN_PASSWORD to a "
+                    "strong value (at least 12 characters, not a common default)."
+                )
             user = users_repo.create_user(
                 conn,
                 settings.bootstrap_admin_username,
                 None,
-                hash_password(settings.bootstrap_admin_password),
+                hash_password(password),
             )
             users_repo.assign_role(conn, user["id"], "Administrator")
             conn.commit()
@@ -45,10 +65,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="releaseit-auth", version="0.1.0", lifespan=lifespan)
 
+# Never combine a wildcard origin with credentials (any site could then make
+# credentialed cross-origin requests). Credentials require an explicit allow-list.
+_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
-    allow_credentials=True,
+    allow_origins=_cors_origins or ["*"],
+    allow_credentials="*" not in _cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

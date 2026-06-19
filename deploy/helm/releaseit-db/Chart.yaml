@@ -1,0 +1,6 @@
+apiVersion: v2
+name: releaseit-db
+description: Single shared PostgreSQL instance for ReleaseIT (per-service schema + user segregation)
+type: application
+version: 0.1.0
+appVersion: "16"

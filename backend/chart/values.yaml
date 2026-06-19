@@ -1,0 +1,77 @@
+image: docker.io/library/releaseit-backend:latest
+# Use locally-loaded image (e.g. `minikube image load`) instead of pulling
+# from a remote registry. Set to Always for real registries.
+pullPolicy: IfNotPresent
+replicas: 1
+solutionEnabled: true
+# Disable auth for local development / tests only.
+authEnabled: true
+# The release workflow is database-backed: it is seeded by the backend's
+# workflow migration and edited at runtime on the configuration page.
+corsOrigins: "*"
+
+# Release workflow / readiness rules.
+# Roles allowed to perform a transition that doesn't set its own `roles` in states.yaml.
+defaultTransitionRoles: "QA Manager,Release Manager,Administrator"
+# Required documentation as `Label=keyword` pairs (keyword matched against published doc names).
+requiredDocs: "Release Notes=release-notes,Installation Guide=install"
+# Jira issue statuses that count as "closed". Everything else is open.
+closedBugStatuses: "Done"
+
+dbPool:
+  minSize: 1
+  maxSize: 10
+
+# Connection to the shared PostgreSQL instance (releaseit-db chart). The
+# backend logs in as its own role, whose search_path is pinned to the
+# `releaseit` schema — its data is segregated from the auth service's schema.
+db:
+  host: releaseit-db
+  port: 5432
+  user: releaseit
+  password: releaseit
+  database: releaseit
+
+# JWT resource-server config. Point at releaseit-auth or any OIDC engine.
+jwt:
+  issuer: "http://releaseit-auth"
+  audience: "releaseit"
+  jwksUrl: "http://releaseit-auth:8001/.well-known/jwks.json"
+  roleClaim: "roles"
+
+# Seed issue-tracker selection ("jira" or "github"). These are defaults only —
+# the configuration page persists overrides in the database at runtime.
+trackerProvider: "jira"
+
+# Seed LLM engine for release-note generation ("claude" or "ollama"). Defaults
+# only; the configuration page persists overrides (incl. the Claude API key) at
+# runtime. Leave claude.apiKey empty here and set it from the UI / a Secret.
+llm:
+  provider: "claude"
+  claude:
+    apiKey: ""
+    model: "claude-opus-4-8"
+  ollama:
+    baseUrl: "http://localhost:11434"
+    model: "llama3"
+
+# Optional outbound integrations (token auth). Enable and fill in the
+# base URL / token to activate.
+integrations:
+  jira:
+    enabled: false
+    baseUrl: ""
+    token: ""
+  github:
+    enabled: false
+    baseUrl: "https://api.github.com"
+    repo: ""
+    token: ""
+  gitlab:
+    enabled: false
+    baseUrl: ""
+    token: ""
+  awx:
+    enabled: false
+    baseUrl: ""
+    token: ""

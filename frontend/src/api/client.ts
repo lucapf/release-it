@@ -68,11 +68,17 @@ export interface JiraIssue {
 }
 
 // --- Workflow (state graph + per-transition RBAC) --------------------------
-export interface WorkflowTransition { name: string; target: string; roles: string[] }
+export interface WorkflowTransition { name: string; target: string; roles: string[]; requires: string[] }
 export interface WorkflowState {
   name: string; score: number; is_final: boolean; transitions: WorkflowTransition[];
 }
 export interface Workflow { initial_state: string; states: WorkflowState[] }
+
+// Payload to replace the whole graph (PUT /api/v1/workflow). State order
+// defines scoring, so the first state is the initial one.
+export interface WorkflowTransitionInput { name: string; target: string; roles: string[]; requires: string[] }
+export interface WorkflowStateInput { name: string; transitions: WorkflowTransitionInput[] }
+export interface WorkflowUpdate { states: WorkflowStateInput[] }
 
 // --- Release status summary ------------------------------------------------
 export interface RequiredDoc { label: string; present: boolean }
@@ -156,6 +162,8 @@ export const listReleases = (productId: number) =>
   api.get<Release[]>(`/api/v1/product/${productId}/releases`).then((r) => r.data);
 export const createRelease = (product_id: number, version: string) =>
   api.post<Release>("/api/v1/release", { product_id, version }).then((r) => r.data);
+export const deleteRelease = (releaseId: number) =>
+  api.delete(`/api/v1/release/${releaseId}`).then((r) => r.data);
 export const transitionRelease = (releaseId: number, transition: string) =>
   api.post<Release>(`/api/v1/release/${releaseId}/transition`, { transition }).then((r) => r.data);
 export const getReleaseStatus = (releaseId: number) =>
@@ -177,8 +185,19 @@ export const deleteCheck = (checkId: number) =>
 export const getWorkflow = () =>
   api.get<Workflow>("/api/v1/workflow").then((r) => r.data);
 
+// Replace the entire workflow graph (admin only).
+export const updateWorkflow = (states: WorkflowStateInput[]) =>
+  api.put<Workflow>("/api/v1/workflow", { states }).then((r) => r.data);
+
+// Download the persisted workflow as states.yaml-compatible YAML.
+export const exportWorkflowYaml = () =>
+  api.get<string>("/api/v1/workflow/export", { responseType: "text" }).then((r) => r.data);
+
 // Known ReleaseIT roles (mirrors backend app.core.jwt_verify).
 export const ROLES = ["Developer", "QA Manager", "Release Manager", "Administrator"];
+
+// Readiness guards a transition may require (mirrors backend KNOWN_GUARDS).
+export const GUARDS = ["no_open_issues", "docs_complete", "checks_done"];
 
 export interface TransitionRoleUpdate { state: string; transition: string; roles: string[] }
 export const setTransitionRoles = (overrides: TransitionRoleUpdate[]) =>
@@ -220,9 +239,33 @@ export const syncJira = (
   filter: { release_label?: string; jql?: string; milestone?: string }
 ) => api.post<JiraIssue[]>(`/api/v1/release/${releaseId}/jira/sync`, filter).then((r) => r.data);
 
+// Saved per-release tracker filter (milestone | label | jql), applied automatically.
+export interface SyncFilter { release_id: number; mode: string; value: string; updated_at: string }
+export const getSyncFilter = (releaseId: number) =>
+  api.get<SyncFilter | null>(`/api/v1/release/${releaseId}/sync-filter`).then((r) => r.data);
+export const saveSyncFilter = (releaseId: number, mode: string, value: string) =>
+  api.put<SyncFilter>(`/api/v1/release/${releaseId}/sync-filter`, { mode, value }).then((r) => r.data);
+
 // --- Environments ----------------------------------------------------------
 export const listEnvironments = () =>
   api.get<Environment[]>("/api/v1/environment").then((r) => r.data);
+
+// --- User management (admin only; served by the auth service) --------------
+export interface User {
+  id: number; username: string; email: string | null;
+  created_at: string; roles: string[];
+}
+const UM = "/api/v1/user-management";
+export const listUsers = () => api.get<User[]>(`${UM}/users`).then((r) => r.data);
+export const createUser = (body: {
+  username: string; password: string; email?: string; roles: string[];
+}) => api.post<User>(`${UM}/users`, body).then((r) => r.data);
+export const updateUser = (
+  userId: number,
+  patch: { email?: string; roles?: string[] }
+) => api.put<User>(`${UM}/users/${userId}`, patch).then((r) => r.data);
+export const deleteUser = (userId: number) =>
+  api.delete(`${UM}/users/${userId}`).then((r) => r.data);
 
 // --- Current user (decoded from the JWT; backend remains the enforcer) ------
 export interface CurrentUser { subject: string; roles: string[] }

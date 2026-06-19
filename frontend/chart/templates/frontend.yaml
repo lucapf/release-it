@@ -11,7 +11,7 @@ kind: Deployment
 metadata:
   name: releaseit-frontend
 spec:
-  replicas: {{ .Values.frontend.replicas }}
+  replicas: {{ .Values.replicas }}
   selector: { matchLabels: { app: releaseit-frontend } }
   template:
     metadata:
@@ -19,8 +19,8 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: {{ .Values.frontend.image }}
-          imagePullPolicy: {{ .Values.frontend.pullPolicy | default "IfNotPresent" }}
+          image: {{ .Values.image }}
+          imagePullPolicy: {{ .Values.pullPolicy | default "IfNotPresent" }}
           ports: [{ containerPort: 80 }]
 {{- if .Values.ingress.enabled }}
 ---

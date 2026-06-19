@@ -20,8 +20,10 @@ def create_user(conn: psycopg.Connection, username: str, email: str | None, pass
 
 
 def get_by_username(conn: psycopg.Connection, username: str) -> dict | None:
+    # Username matching is case-insensitive (login + duplicate detection); the
+    # original case is still stored and shown.
     return conn.execute(
-        "SELECT id, username, email, password_hash FROM app_user WHERE username = %s",
+        "SELECT id, username, email, password_hash FROM app_user WHERE lower(username) = lower(%s)",
         (username,),
     ).fetchone()
 
@@ -30,6 +32,13 @@ def list_users(conn: psycopg.Connection) -> list[dict]:
     return conn.execute(
         "SELECT id, username, email, created_at FROM app_user ORDER BY username"
     ).fetchall()
+
+
+def get_user(conn: psycopg.Connection, user_id: int) -> dict | None:
+    return conn.execute(
+        "SELECT id, username, email, created_at FROM app_user WHERE id = %s",
+        (user_id,),
+    ).fetchone()
 
 
 def update_user(conn: psycopg.Connection, user_id: int, email: str | None) -> dict | None:
@@ -64,6 +73,24 @@ def assign_role(conn: psycopg.Connection, user_id: int, role_name: str) -> None:
         """,
         (user_id, role_name),
     )
+
+
+def set_roles(conn: psycopg.Connection, user_id: int, roles: list[str]) -> None:
+    """Replace a user's role assignments with exactly ``roles``."""
+    conn.execute("DELETE FROM user_role WHERE user_id = %s", (user_id,))
+    for name in roles:
+        assign_role(conn, user_id, name)
+
+
+def count_admins(conn: psycopg.Connection) -> int:
+    """Number of users holding the Administrator role (for lockout guards)."""
+    return conn.execute(
+        """
+        SELECT count(*) AS n FROM user_role ur
+        JOIN role r ON r.id = ur.role_id
+        WHERE r.name = 'Administrator'
+        """
+    ).fetchone()["n"]
 
 
 # --- Roles -----------------------------------------------------------------

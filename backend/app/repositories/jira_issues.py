@@ -1,7 +1,8 @@
-"""Jira issue data access — raw parametrized SQL via psycopg3.
+"""Tracked-issue data access — raw parametrized SQL via psycopg3.
 
-Issues are fetched through :mod:`app.integrations.jira` and cached per release so
-the UI can display the "contained issues" without re-querying Jira every time.
+Issues are fetched through :mod:`app.integrations.trackers` (Jira or GitHub) and
+cached per release so the UI can display the "contained issues" without
+re-querying the tracker every time.
 """
 from __future__ import annotations
 

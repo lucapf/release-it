@@ -1,0 +1,26 @@
+# Single PostgreSQL instance shared by the backend and auth services.
+#
+# One database holds both services' data, but each service is segregated into
+# its own schema owned by its own login role. Each role's default search_path
+# is pinned to its schema, so the services' (unqualified) SQL and migrations
+# land in — and only see — their own schema. No application SQL changes needed.
+image: postgres:16-alpine
+storage: 1Gi
+
+# Superuser — used only for bootstrap (initdb). The services never use it.
+superuser:
+  user: postgres
+  password: postgres
+
+# The single shared database both services connect to.
+database: releaseit
+
+# One tenant per service: a login role + an owned schema. The role's
+# search_path is set to its schema so existing unqualified table names resolve.
+tenants:
+  - user: releaseit
+    password: releaseit
+    schema: releaseit
+  - user: auth
+    password: auth
+    schema: auth

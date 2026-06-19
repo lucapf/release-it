@@ -7,7 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AUTH_", extra="ignore")
 
-    database_url: str = "postgresql://auth:auth@localhost:5433/auth"
+    # Shared ReleaseIT Postgres: the `auth` role's search_path is pinned to the
+    # `auth` schema, so this service's tables stay segregated from the backend's.
+    database_url: str = "postgresql://auth:auth@localhost:5432/releaseit"
     db_pool_min_size: int = 1
     db_pool_max_size: int = 5
 
@@ -23,8 +25,11 @@ class Settings(BaseSettings):
     private_key_pem: str = ""
 
     # Bootstrap admin (created on first migration/seed if no users exist).
+    # The password has NO default on purpose: the service refuses to seed an
+    # admin unless a strong AUTH_BOOTSTRAP_ADMIN_PASSWORD is supplied, so a
+    # fresh deployment can't be taken over with guessable credentials.
     bootstrap_admin_username: str = "admin"
-    bootstrap_admin_password: str = "admin"
+    bootstrap_admin_password: str = ""
 
     migrations_dir: str = "migrations"
     cors_origins: str = "*"

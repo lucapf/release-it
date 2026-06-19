@@ -1,0 +1,8 @@
+image: docker.io/library/releaseit-frontend:latest
+pullPolicy: IfNotPresent
+replicas: 1
+
+ingress:
+  enabled: true
+  className: nginx
+  host: releaseit.local

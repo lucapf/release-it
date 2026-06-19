@@ -1,7 +1,8 @@
 """Application configuration via environment variables.
 
 All settings are read from the environment (or a local ``.env`` file) using
-pydantic-settings. See ``deploy/docker-compose.yml`` for the dev defaults.
+pydantic-settings. The defaults below target a local Postgres; the Helm charts
+under ``deploy/`` override them for the cluster.
 """
 from __future__ import annotations
 
@@ -31,12 +32,42 @@ class Settings(BaseSettings):
     auth_enabled: bool = True
 
     # --- Release state machine ---------------------------------------------
-    states_config_path: str = "app/config/states.yaml"
+    # The workflow graph is database-backed (seeded by the workflow migration).
+    # Roles allowed to perform a transition that does not declare its own
+    # ``roles`` in the workflow definition. Comma-separated.
+    default_transition_roles: str = "QA Manager,Release Manager,Administrator"
+
+    # --- Release readiness rules -------------------------------------------
+    # Documentation a release must carry before it is considered complete,
+    # as ``Label=keyword`` pairs (keyword matched case-insensitively against
+    # the published — non-draft — document file names). Comma-separated.
+    required_docs: str = "Release Notes=release-notes,Installation Guide=install"
+    # Jira issue statuses that count as "closed". Everything else is open.
+    closed_bug_statuses: str = "Done"
+
+    # --- Issue tracker ------------------------------------------------------
+    # Active issue tracker: "jira" or "github". These are the seed defaults;
+    # the runtime configuration page (app_config table) overrides them.
+    tracker_provider: str = "jira"
 
     # --- Integrations (optional, token auth) --------------------------------
     jira_enabled: bool = False
     jira_base_url: str = ""
     jira_token: str = ""
+
+    github_enabled: bool = False
+    github_base_url: str = "https://api.github.com"
+    github_repo: str = ""  # "owner/repo"
+    github_token: str = ""
+
+    # --- LLM (release-note generation) -------------------------------------
+    # Engine: "claude" (Anthropic API) or "ollama" (local server). Seed
+    # defaults; the configuration page (app_config) overrides them at runtime.
+    llm_provider: str = "claude"
+    claude_api_key: str = ""
+    claude_model: str = "claude-opus-4-8"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3"
 
     gitlab_enabled: bool = False
     gitlab_base_url: str = ""

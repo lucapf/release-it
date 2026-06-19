@@ -1,0 +1,24 @@
+# Bootstrap SQL mounted into /docker-entrypoint-initdb.d. It runs once, as the
+# superuser, against POSTGRES_DB on first cluster initialisation. For each
+# tenant it creates a login role and a schema owned by that role, and pins the
+# role's search_path to its own schema so the service's unqualified SQL is
+# automatically segregated. Roles are NOT granted access to each other's schema.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: releaseit-db-initdb
+data:
+  10-tenants.sql: |
+    {{- range .Values.tenants }}
+    -- ---- tenant: {{ .user }} ------------------------------------------------
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ .user }}') THEN
+        CREATE ROLE {{ .user }} LOGIN PASSWORD '{{ .password }}';
+      END IF;
+    END
+    $$;
+    CREATE SCHEMA IF NOT EXISTS {{ .schema }} AUTHORIZATION {{ .user }};
+    GRANT ALL ON SCHEMA {{ .schema }} TO {{ .user }};
+    ALTER ROLE {{ .user }} SET search_path = {{ .schema }};
+    {{- end }}

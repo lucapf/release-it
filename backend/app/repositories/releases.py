@@ -48,6 +48,14 @@ def set_state(conn: psycopg.Connection, release_id: int, state: str) -> dict | N
     ).fetchone()
 
 
+def delete(conn: psycopg.Connection, release_id: int) -> bool:
+    """Delete a release. Child rows (checks, artifacts, documentation, synced
+    issues, sync filter) cascade via their FKs; inherited releases keep their
+    history with parent_release_id reset to NULL."""
+    cur = conn.execute("DELETE FROM release WHERE id = %s", (release_id,))
+    return cur.rowcount > 0
+
+
 # --- Checks ----------------------------------------------------------------
 def add_check(conn: psycopg.Connection, release_id: int, label: str, phase: str) -> dict:
     return conn.execute(
@@ -78,6 +86,11 @@ def set_check_done(conn: psycopg.Connection, check_id: int, done: bool) -> dict 
         """,
         (done, check_id),
     ).fetchone()
+
+
+def delete_check(conn: psycopg.Connection, check_id: int) -> bool:
+    cur = conn.execute("DELETE FROM check_item WHERE id = %s", (check_id,))
+    return cur.rowcount > 0
 
 
 # --- Artifacts (bytea) -----------------------------------------------------

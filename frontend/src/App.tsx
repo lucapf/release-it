@@ -24,6 +24,7 @@ import {
   IconRocket,
   IconSettings,
   IconSun,
+  IconUsers,
   IconWorld,
 } from "@tabler/icons-react";
 import { useAuth } from "./auth/AuthContext";
@@ -32,16 +33,24 @@ import { DashboardPage } from "./pages/Dashboard";
 import { ProductDetailPage } from "./pages/ProductDetail";
 import { EnvironmentsPage } from "./pages/Environments";
 import { ConfigurationPage } from "./pages/Configuration";
+import { UsersPage } from "./pages/Users";
 
 function Protected({ children }: { children: JSX.Element }) {
   const { authenticated } = useAuth();
   return authenticated ? children : <Navigate to="/login" replace />;
 }
 
+// Gate a route to administrators; everyone else is bounced to the dashboard.
+function AdminOnly({ children }: { children: JSX.Element }) {
+  const { hasRole } = useAuth();
+  return hasRole("Administrator") ? children : <Navigate to="/dashboard" replace />;
+}
+
 const NAV = [
   { to: "/dashboard", label: "Dashboard", icon: IconLayoutDashboard },
   { to: "/environments", label: "Environments", icon: IconWorld },
-  { to: "/configuration", label: "Configuration", icon: IconSettings },
+  { to: "/users", label: "Users", icon: IconUsers, adminOnly: true },
+  { to: "/configuration", label: "Configuration", icon: IconSettings, adminOnly: true },
 ];
 
 function ColorSchemeToggle() {
@@ -114,7 +123,9 @@ function UserMenu() {
 
 function Shell({ children }: { children: JSX.Element }) {
   const { pathname } = useLocation();
+  const { hasRole } = useAuth();
   const [opened, { toggle, close }] = useDisclosure();
+  const nav = NAV.filter((item) => !item.adminOnly || hasRole("Administrator"));
   return (
     <AppShell
       header={{ height: 60 }}
@@ -148,7 +159,7 @@ function Shell({ children }: { children: JSX.Element }) {
 
       <AppShell.Navbar p="sm">
         <div style={{ flex: 1 }}>
-          {NAV.map((item) => {
+          {nav.map((item) => {
             const Icon = item.icon;
             return (
               <NavLink
@@ -193,8 +204,12 @@ export function App() {
         element={<Protected><Shell><EnvironmentsPage /></Shell></Protected>}
       />
       <Route
+        path="/users"
+        element={<Protected><Shell><AdminOnly><UsersPage /></AdminOnly></Shell></Protected>}
+      />
+      <Route
         path="/configuration"
-        element={<Protected><Shell><ConfigurationPage /></Shell></Protected>}
+        element={<Protected><Shell><AdminOnly><ConfigurationPage /></AdminOnly></Shell></Protected>}
       />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

@@ -1,0 +1,31 @@
+auth:
+  image: releaseit-auth:latest
+  pullPolicy: IfNotPresent
+  replicas: 1
+  issuer: "http://releaseit-auth"
+  audience: "releaseit"
+  accessTokenTtlSeconds: 3600
+  roleClaim: "roles"
+  # Mount a stable RS256 private key in production (PEM). Empty = ephemeral dev key.
+  privateKeyPem: ""
+  bootstrapAdmin:
+    username: admin
+    # No default: set a strong password (>= 12 chars) at install time, e.g.
+    # --set auth.bootstrapAdmin.password=... or via a secret. The service
+    # refuses to seed the admin with a missing/guessable password.
+    password: ""
+  migrationsDir: "migrations"
+  corsOrigins: "*"
+  dbPool:
+    minSize: 1
+    maxSize: 5
+
+# Connection to the shared PostgreSQL instance (releaseit-db chart). The auth
+# service logs in as its own role, whose search_path is pinned to the `auth`
+# schema — its data is segregated from the backend's schema in the same DB.
+db:
+  host: releaseit-db
+  port: 5432
+  user: auth
+  password: auth
+  database: releaseit

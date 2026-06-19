@@ -55,7 +55,7 @@ export function ReleaseStatusCard({ release }: { release: Release }) {
         <Text size="xs" c="dimmed" tt="uppercase" fw={600} mt="md" mb={6}>
           Available actions
         </Text>
-        <WorkflowActions release={release} />
+        <WorkflowActions release={release} status={status} />
       </Card>
 
       <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">

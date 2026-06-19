@@ -1,30 +1,24 @@
-backend:
-  image: docker.io/library/releaseit-backend:latest
-  # Use locally-loaded image (e.g. `minikube image load`) instead of pulling
-  # from a remote registry. Set to Always for real registries.
-  pullPolicy: IfNotPresent
-  replicas: 1
-  solutionEnabled: true
-  # JWT resource-server config. Point at releaseit-auth or any OIDC engine.
-  jwt:
-    issuer: "http://releaseit-auth"
-    audience: "releaseit"
-    jwksUrl: "http://releaseit-auth:8001/.well-known/jwks.json"
-    roleClaim: "roles"
+# Umbrella values. Each key matches a subchart name; anything you put under it
+# overrides that subchart's own values.yaml. Defaults already work for a local
+# minikube run, so this file only needs entries when you want to change them.
+#
+# The single shared Postgres and the per-service schema/user segregation live in
+# the releaseit-db subchart; backend/auth point at it by default.
 
-frontend:
-  image: docker.io/library/releaseit-frontend:latest
-  pullPolicy: IfNotPresent
-  replicas: 1
+# releaseit-db:
+#   storage: 5Gi
+#   tenants:
+#     - { user: releaseit, password: s3cret, schema: releaseit }
+#     - { user: auth,      password: s3cret, schema: auth }
 
-postgres:
-  image: postgres:16-alpine
-  user: releaseit
-  password: releaseit
-  database: releaseit
-  storage: 1Gi
+# releaseit-backend:
+#   replicas: 2
+#   solutionEnabled: true
 
-ingress:
-  enabled: true
-  className: nginx
-  host: releaseit.local
+# releaseit-auth:
+#   auth:
+#     bootstrapAdmin: { username: admin, password: change-me }
+
+# releaseit-frontend:
+#   ingress:
+#     host: releaseit.local

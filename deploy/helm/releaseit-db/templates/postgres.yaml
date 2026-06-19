@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: releaseit-db
+spec:
+  selector: { app: releaseit-db }
+  ports: [{ port: 5432, targetPort: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: releaseit-db
+spec:
+  serviceName: releaseit-db
+  replicas: 1
+  selector: { matchLabels: { app: releaseit-db } }
+  template:
+    metadata:
+      labels: { app: releaseit-db }
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.image }}
+          env:
+            - { name: POSTGRES_USER, value: {{ .Values.superuser.user | quote }} }
+            - { name: POSTGRES_PASSWORD, value: {{ .Values.superuser.password | quote }} }
+            - { name: POSTGRES_DB, value: {{ .Values.database | quote }} }
+            # initdb scripts write into POSTGRES_DB; PGDATA lives in a subdir so
+            # the mounted volume's lost+found doesn't block initialisation.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [{ containerPort: 5432 }]
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: initdb, mountPath: /docker-entrypoint-initdb.d }
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.superuser.user }}", "-d", "{{ .Values.database }}"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: initdb
+          configMap: { name: releaseit-db-initdb }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: {{ .Values.storage }} } }

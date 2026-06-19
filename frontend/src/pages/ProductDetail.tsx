@@ -37,7 +37,6 @@ import {
 } from "@tabler/icons-react";
 import {
   getProduct,
-  updateProduct,
   getConfig,
   listReleases,
   createRelease,
@@ -46,6 +45,8 @@ import {
   generateReleaseNotes,
   listJiraIssues,
   syncJira,
+  getSyncFilter,
+  saveSyncFilter,
   getReleaseHistory,
   listChecks,
   addCheck,
@@ -56,8 +57,6 @@ import {
   AuditEntry,
   Phase,
 } from "../api/client";
-import { StateBadge } from "../components/StateBadge";
-import { WorkflowActions } from "../components/WorkflowActions";
 import { ReleaseStatusCard } from "../components/ReleaseStatusCard";
 import { EmptyState } from "../components/EmptyState";
 import { useAuth } from "../auth/AuthContext";
@@ -112,11 +111,9 @@ function ReleaseSelector({
   );
 }
 
-// --- Releases tab ----------------------------------------------------------
-function ReleasesTab({ productId, releases }: { productId: number; releases: Release[] }) {
+// --- New release control (lives alongside the release selector) ------------
+function NewReleaseControl({ productId }: { productId: number }) {
   const qc = useQueryClient();
-  const { hasRole } = useAuth();
-  const canCreate = hasRole("Developer", "Release Manager", "Administrator");
   const [version, setVersion] = useState("1.0.0");
 
   const add = useMutation({
@@ -130,52 +127,18 @@ function ReleasesTab({ productId, releases }: { productId: number; releases: Rel
   });
 
   return (
-    <Stack gap="md">
-      {canCreate && (
-        <Group gap="xs">
-          <TextInput
-            value={version}
-            onChange={(e) => setVersion(e.currentTarget.value)}
-            placeholder="1.2.0"
-            label="New release version"
-          />
-          <Button mt="auto" loading={add.isPending} onClick={() => add.mutate()}>
-            Add release
-          </Button>
-        </Group>
-      )}
-
-      {releases.length === 0 ? (
-        <Card>
-          <EmptyState
-            icon={IconRocket}
-            title="No releases yet"
-            description={canCreate ? "Add the first release above to begin tracking it through the workflow." : "Releases for this product will appear here."}
-          />
-        </Card>
-      ) : (
-        <Table.ScrollContainer minWidth={420}>
-          <Table highlightOnHover verticalSpacing="sm">
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Version</Table.Th>
-                <Table.Th>State</Table.Th>
-                <Table.Th>Allowed actions</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {releases.map((r) => (
-                <Table.Tr key={r.id}>
-                  <Table.Td fw={600}>v{r.version}</Table.Td>
-                  <Table.Td><StateBadge state={r.state} /></Table.Td>
-                  <Table.Td><WorkflowActions release={r} size="compact-xs" /></Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        </Table.ScrollContainer>
-      )}
-    </Stack>
+    <Group gap="xs" align="flex-end">
+      <TextInput
+        label="New release version"
+        value={version}
+        onChange={(e) => setVersion(e.currentTarget.value)}
+        placeholder="1.2.0"
+        maw={160}
+      />
+      <Button loading={add.isPending} onClick={() => add.mutate()}>
+        Add release
+      </Button>
+    </Group>
   );
 }
 
@@ -265,65 +228,35 @@ function DocumentationTab({ releaseId }: { releaseId: number }) {
   );
 }
 
-// --- Per-product repository binding (GitHub) --------------------------------
-function RepoBinding({ product, canEdit }: { product: Product; canEdit: boolean }) {
-  const qc = useQueryClient();
-  const [repo, setRepo] = useState(product.tracker_repo);
-  useEffect(() => setRepo(product.tracker_repo), [product.tracker_repo]);
-
-  const save = useMutation({
-    mutationFn: () => updateProduct(product.id, { tracker_repo: repo.trim() }),
-    onSuccess: (p) => {
-      qc.setQueryData(["product", product.id], p);
-      qc.invalidateQueries({ queryKey: ["overview"] });
-      notifications.show({ message: "Repository updated", color: "teal" });
-    },
-    onError: (e: any) => notifyApiError(e, "Could not update repository"),
-  });
-
-  const dirty = repo.trim() !== product.tracker_repo;
-  return (
-    <Group align="flex-end" gap="sm" mb="sm">
-      <TextInput
-        label="Repository (this product)"
-        description="GitHub owner/repo this product's issues live in"
-        placeholder="owner/repo"
-        leftSection={<IconBrandGithub size={15} />}
-        value={repo}
-        onChange={(e) => setRepo(e.currentTarget.value)}
-        disabled={!canEdit}
-        style={{ flex: 1 }}
-      />
-      {canEdit && (
-        <Button variant="light" disabled={!dirty} loading={save.isPending} onClick={() => save.mutate()}>
-          Save repo
-        </Button>
-      )}
-    </Group>
-  );
-}
-
 // --- Issues tab (tracker-aware: Jira or GitHub) ----------------------------
+// One day, in ms — releases not yet Approved go "stale" once their last sync
+// is older than this and the date is highlighted.
+const STALE_MS = 24 * 60 * 60 * 1000;
+
 function JiraTab({
   releaseId,
   product,
-  version,
+  release,
 }: {
   releaseId: number;
   product: Product;
-  version: string;
+  release: Release | null;
 }) {
   const qc = useQueryClient();
-  const { hasRole } = useAuth();
-  const canSync = hasRole("Developer", "Release Manager", "Administrator");
   const key = ["jira", releaseId];
   const { data: issues = [] } = useQuery({ queryKey: key, queryFn: () => listJiraIssues(releaseId) });
   const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: getConfig });
+  const { data: savedFilter } = useQuery({
+    queryKey: ["sync-filter", releaseId],
+    queryFn: () => getSyncFilter(releaseId),
+  });
 
+  const version = release?.version ?? "";
   const provider = cfg?.tracker_provider ?? "jira";
   const isGitHub = provider === "github";
   const trackerName = isGitHub ? "GitHub" : "Jira";
-  const repoMissing = isGitHub && !product.tracker_repo.trim();
+  const repo = product.tracker_repo.trim();
+  const repoMissing = isGitHub && !repo;
 
   // GitHub filters by milestone (default) or label; Jira by label or raw JQL.
   const [ghMode, setGhMode] = useState<"milestone" | "label">("milestone");
@@ -332,12 +265,30 @@ function JiraTab({
   const [label, setLabel] = useState("");
   const [jql, setJql] = useState("");
 
+  // A saved filter is applied automatically once it (and the tracker) load.
+  useEffect(() => {
+    if (!savedFilter || !cfg) return;
+    const { mode, value } = savedFilter;
+    if (mode === "milestone") { setGhMode("milestone"); setMilestone(value); }
+    else if (mode === "jql") { setJiraMode("jql"); setJql(value); }
+    else if (mode === "label") {
+      setLabel(value);
+      if (isGitHub) setGhMode("label"); else setJiraMode("label");
+    }
+  }, [savedFilter, cfg, isGitHub]);
+
+  // The (mode, value) currently chosen in the form, for sync and save.
+  const currentFilter = (): { mode: string; value: string } => {
+    if (isGitHub) return ghMode === "label" ? { mode: "label", value: label } : { mode: "milestone", value: milestone };
+    return jiraMode === "jql" ? { mode: "jql", value: jql } : { mode: "label", value: label };
+  };
+
   const sync = useMutation({
     mutationFn: () => {
-      if (isGitHub) {
-        return syncJira(releaseId, ghMode === "label" ? { release_label: label } : { milestone });
-      }
-      return syncJira(releaseId, jiraMode === "jql" ? { jql } : { release_label: label });
+      const f = currentFilter();
+      if (f.mode === "milestone") return syncJira(releaseId, { milestone: f.value });
+      if (f.mode === "jql") return syncJira(releaseId, { jql: f.value });
+      return syncJira(releaseId, { release_label: f.value });
     },
     onSuccess: (data) => {
       qc.setQueryData(key, data);
@@ -347,112 +298,128 @@ function JiraTab({
     onError: (e: any) => notifyApiError(e, "Issue sync failed"),
   });
 
+  const save = useMutation({
+    mutationFn: () => { const f = currentFilter(); return saveSyncFilter(releaseId, f.mode, f.value); },
+    onSuccess: (data) => {
+      qc.setQueryData(["sync-filter", releaseId], data);
+      notifications.show({ message: "Filter saved — it will be applied automatically", color: "teal" });
+    },
+    onError: (e: any) => notifyApiError(e, "Could not save filter"),
+  });
+
+  // Last sync = most recent synced_at across the cached issues. For releases
+  // that are not yet Approved, a sync older than a day is highlighted in red.
+  const lastSyncMs = issues.reduce((max, i) => Math.max(max, new Date(i.synced_at).getTime()), 0);
+  const hasSync = lastSyncMs > 0;
+  const isApproved = release?.state === "Approved";
+  const stale = hasSync && !isApproved && Date.now() - lastSyncMs > STALE_MS;
+
   return (
     <Stack gap="md">
-      {canSync && (
-        <Card withBorder padding="md">
-          <Group justify="space-between" mb="xs">
-            <Title order={5}>Sync issues from {trackerName}</Title>
-            <Badge
-              variant="light"
-              color={isGitHub ? "dark" : "blue"}
-              leftSection={isGitHub ? <IconBrandGithub size={12} /> : undefined}
-            >
-              active tracker: {trackerName}
-            </Badge>
+      <Card withBorder padding="md">
+        <Group justify="space-between" mb="xs">
+          <Title order={5}>Sync issues from {trackerName}</Title>
+          <Badge
+            variant="light"
+            color={isGitHub ? "dark" : "blue"}
+            leftSection={isGitHub ? <IconBrandGithub size={12} /> : undefined}
+          >
+            {trackerName}{repo ? ` · ${repo}` : ""}
+          </Badge>
+        </Group>
+
+        <Text size="sm" mb="sm" c={stale ? "red" : "dimmed"} fw={stale ? 600 : undefined}>
+          {hasSync
+            ? `Last synced: ${new Date(lastSyncMs).toLocaleString()}${stale ? " — over a day old, re-sync recommended" : ""}`
+            : "Not synced yet."}
+        </Text>
+
+        {repoMissing ? (
+          <Alert color="orange" variant="light">
+            This product has no target project set. Configure it in Configuration → Projects before syncing.
+          </Alert>
+        ) : (
+          <Group align="flex-end" gap="sm">
+            {isGitHub ? (
+              <>
+                <Select
+                  label="Filter by"
+                  data={[
+                    { value: "milestone", label: "Milestone" },
+                    { value: "label", label: "Label" },
+                  ]}
+                  value={ghMode}
+                  onChange={(v) => setGhMode((v as "milestone" | "label") ?? "milestone")}
+                  maw={150}
+                  allowDeselect={false}
+                />
+                {ghMode === "milestone" ? (
+                  <TextInput
+                    label="Milestone"
+                    placeholder={version || "e.g. 0.1.0"}
+                    description={`Defaults to the release version (${version})`}
+                    value={milestone}
+                    onChange={(e) => setMilestone(e.currentTarget.value)}
+                    style={{ flex: 1 }}
+                  />
+                ) : (
+                  <TextInput
+                    label="Label"
+                    placeholder="e.g. release/0.1.0"
+                    value={label}
+                    onChange={(e) => setLabel(e.currentTarget.value)}
+                    style={{ flex: 1 }}
+                  />
+                )}
+              </>
+            ) : (
+              <>
+                <Select
+                  label="Filter by"
+                  data={[
+                    { value: "label", label: "Release label" },
+                    { value: "jql", label: "Custom JQL" },
+                  ]}
+                  value={jiraMode}
+                  onChange={(v) => setJiraMode((v as "label" | "jql") ?? "label")}
+                  maw={160}
+                  allowDeselect={false}
+                />
+                {jiraMode === "label" ? (
+                  <TextInput
+                    label="Release label"
+                    placeholder="e.g. 2025-Q3"
+                    value={label}
+                    onChange={(e) => setLabel(e.currentTarget.value)}
+                    style={{ flex: 1 }}
+                  />
+                ) : (
+                  <TextInput
+                    label="JQL query"
+                    placeholder='project = REL AND fixVersion = "1.2.0"'
+                    value={jql}
+                    onChange={(e) => setJql(e.currentTarget.value)}
+                    style={{ flex: 1 }}
+                  />
+                )}
+              </>
+            )}
+            <Button loading={sync.isPending} onClick={() => sync.mutate()}>
+              Sync now
+            </Button>
+            <Button variant="light" loading={save.isPending} onClick={() => save.mutate()}>
+              Save filter
+            </Button>
           </Group>
-          <Text size="sm" c="dimmed" mb="sm">
-            {isGitHub
-              ? "Fetch the issues for this release from GitHub. By default they are matched by the milestone named after the release version; you can also filter by a label."
-              : "Fetch the issues for this release from Jira. Filter by a release label, or provide a custom JQL query."}
-          </Text>
-
-          {isGitHub && <RepoBinding product={product} canEdit={canSync} />}
-
-          {repoMissing ? (
-            <Alert color="orange" variant="light">
-              Set this product's GitHub repository above before syncing.
-            </Alert>
-          ) : (
-            <Group align="flex-end" gap="sm">
-              {isGitHub ? (
-                <>
-                  <Select
-                    label="Filter by"
-                    data={[
-                      { value: "milestone", label: "Milestone" },
-                      { value: "label", label: "Label" },
-                    ]}
-                    value={ghMode}
-                    onChange={(v) => setGhMode((v as "milestone" | "label") ?? "milestone")}
-                    maw={150}
-                    allowDeselect={false}
-                  />
-                  {ghMode === "milestone" ? (
-                    <TextInput
-                      label="Milestone"
-                      placeholder={version || "e.g. 0.1.0"}
-                      description={`Defaults to the release version (${version})`}
-                      value={milestone}
-                      onChange={(e) => setMilestone(e.currentTarget.value)}
-                      style={{ flex: 1 }}
-                    />
-                  ) : (
-                    <TextInput
-                      label="Label"
-                      placeholder="e.g. release/0.1.0"
-                      value={label}
-                      onChange={(e) => setLabel(e.currentTarget.value)}
-                      style={{ flex: 1 }}
-                    />
-                  )}
-                </>
-              ) : (
-                <>
-                  <Select
-                    label="Filter by"
-                    data={[
-                      { value: "label", label: "Release label" },
-                      { value: "jql", label: "Custom JQL" },
-                    ]}
-                    value={jiraMode}
-                    onChange={(v) => setJiraMode((v as "label" | "jql") ?? "label")}
-                    maw={160}
-                    allowDeselect={false}
-                  />
-                  {jiraMode === "label" ? (
-                    <TextInput
-                      label="Release label"
-                      placeholder="e.g. 2025-Q3"
-                      value={label}
-                      onChange={(e) => setLabel(e.currentTarget.value)}
-                      style={{ flex: 1 }}
-                    />
-                  ) : (
-                    <TextInput
-                      label="JQL query"
-                      placeholder='project = REL AND fixVersion = "1.2.0"'
-                      value={jql}
-                      onChange={(e) => setJql(e.currentTarget.value)}
-                      style={{ flex: 1 }}
-                    />
-                  )}
-                </>
-              )}
-              <Button loading={sync.isPending} onClick={() => sync.mutate()}>
-                Sync now
-              </Button>
-            </Group>
-          )}
-        </Card>
-      )}
+        )}
+      </Card>
 
       {issues.length === 0 ? (
         <Card>
           <EmptyState
             icon={IconListDetails}
             title="No issues synced yet"
-            description={canSync ? "Use the panel above to pull issues for this release from the active tracker." : "Synced tracker issues will appear here."}
+            description="Use the panel above to pull issues for this release from the active tracker."
           />
         </Card>
       ) : (
@@ -640,6 +607,8 @@ function HistoryTab({ releaseId }: { releaseId: number }) {
 export function ProductDetailPage() {
   const { productId } = useParams();
   const [searchParams] = useSearchParams();
+  const { hasRole } = useAuth();
+  const canCreate = hasRole("Developer", "Release Manager", "Administrator");
   const id = Number(productId);
   const { data: product } = useQuery({ queryKey: ["product", id], queryFn: () => getProduct(id) });
   const { data: releases = [], isLoading } = useQuery({
@@ -709,21 +678,29 @@ export function ProductDetailPage() {
         <Text c="dimmed">{releases.length} release{releases.length === 1 ? "" : "s"}</Text>
       </div>
 
-      {activeRelease && (
+      {(activeRelease || canCreate) && (
         <Card withBorder radius="md" padding="md">
-          <ReleaseSelector
-            releases={releases}
-            byKind={byKind}
-            value={activeId}
-            onChange={setSelected}
-          />
+          <Stack gap="md">
+            {activeRelease ? (
+              <ReleaseSelector
+                releases={releases}
+                byKind={byKind}
+                value={activeId}
+                onChange={setSelected}
+              />
+            ) : (
+              <Text c="dimmed" size="sm">
+                No releases yet. Add the first release to begin tracking it through the workflow.
+              </Text>
+            )}
+            {canCreate && <NewReleaseControl productId={id} />}
+          </Stack>
         </Card>
       )}
 
       <Tabs defaultValue="overview" keepMounted={false}>
         <Tabs.List>
           <Tabs.Tab value="overview" leftSection={<IconClipboardText size={16} />}>Overview</Tabs.Tab>
-          <Tabs.Tab value="releases" leftSection={<IconRocket size={16} />}>Releases</Tabs.Tab>
           <Tabs.Tab value="checks" leftSection={<IconChecklist size={16} />}>Checks</Tabs.Tab>
           <Tabs.Tab value="documentation" leftSection={<IconFile size={16} />}>Documentation</Tabs.Tab>
           <Tabs.Tab value="issues" leftSection={<IconListDetails size={16} />}>Issues</Tabs.Tab>
@@ -734,10 +711,6 @@ export function ProductDetailPage() {
           {activeRelease ? (
             <ReleaseStatusCard release={activeRelease} />
           ) : needsRelease("see its status")}
-        </Tabs.Panel>
-
-        <Tabs.Panel value="releases" pt="md">
-          <ReleasesTab productId={id} releases={releases} />
         </Tabs.Panel>
 
         <Tabs.Panel value="checks" pt="md">
@@ -753,7 +726,7 @@ export function ProductDetailPage() {
             <JiraTab
               releaseId={activeId}
               product={product}
-              version={activeRelease?.version ?? ""}
+              release={activeRelease}
             />
           ) : (
             needsRelease("sync tracker issues")

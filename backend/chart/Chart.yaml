@@ -1,0 +1,6 @@
+apiVersion: v2
+name: releaseit-backend
+description: ReleaseIT backend API (FastAPI JWT resource server)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

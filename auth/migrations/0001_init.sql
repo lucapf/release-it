@@ -1,5 +1,6 @@
 -- releaseit-auth schema: users, roles, and their assignment.
--- This DB is independent from the ReleaseIT backend database.
+-- Created in the `auth` schema of the shared DB (the auth role's search_path),
+-- segregated from the ReleaseIT backend's `releaseit` schema.
 
 CREATE TABLE role (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

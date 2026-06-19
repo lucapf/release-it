@@ -32,21 +32,47 @@ import { ReleaseKind } from "../lib/releases";
 import { notifyApiError } from "../lib/errors";
 
 // --- Top-of-page summary ----------------------------------------------------
+// Which release slot the dashboard is filtered by. `null` shows every product.
+type ProductFilter = "stable" | "approval" | "draft" | null;
+
 function StatCard({
   icon: Icon,
   label,
   value,
   color,
+  active,
+  onClick,
 }: {
   icon: typeof IconBox;
   label: string;
   value: number;
   color: string;
+  active?: boolean;
+  onClick?: () => void;
 }) {
   return (
-    <Card padding="md">
+    <Card
+      padding="md"
+      onClick={onClick}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
+      aria-pressed={onClick ? !!active : undefined}
+      style={onClick ? { cursor: "pointer" } : undefined}
+      withBorder={active}
+      styles={active ? { root: { borderColor: `var(--mantine-color-${color}-filled)` } } : undefined}
+    >
       <Group gap="sm" wrap="nowrap">
-        <ThemeIcon variant="light" color={color} size={42} radius="md">
+        <ThemeIcon variant={active ? "filled" : "light"} color={color} size={42} radius="md">
           <Icon size={22} stroke={1.6} />
         </ThemeIcon>
         <div>
@@ -62,16 +88,54 @@ function StatCard({
   );
 }
 
-function SummaryBar({ products }: { products: ProductOverview[] }) {
+function SummaryBar({
+  products,
+  filter,
+  onFilter,
+}: {
+  products: ProductOverview[];
+  filter: ProductFilter;
+  onFilter: (f: ProductFilter) => void;
+}) {
   const stable = products.filter((p) => p.last_stable).length;
   const approval = products.filter((p) => p.under_approval).length;
   const drafts = products.filter((p) => p.draft).length;
+  // Clicking the active card again clears the filter (toggle behaviour).
+  const toggle = (f: Exclude<ProductFilter, null>) => () => onFilter(filter === f ? null : f);
   return (
     <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="md">
-      <StatCard icon={IconBox} label="Products" value={products.length} color="indigo" />
-      <StatCard icon={IconCircleCheck} label="With stable" value={stable} color="teal" />
-      <StatCard icon={IconClockHour4} label="In approval" value={approval} color="yellow" />
-      <StatCard icon={IconPencil} label="Open drafts" value={drafts} color="gray" />
+      <StatCard
+        icon={IconBox}
+        label="Products"
+        value={products.length}
+        color="indigo"
+        active={filter === null}
+        onClick={() => onFilter(null)}
+      />
+      <StatCard
+        icon={IconCircleCheck}
+        label="With stable"
+        value={stable}
+        color="teal"
+        active={filter === "stable"}
+        onClick={toggle("stable")}
+      />
+      <StatCard
+        icon={IconClockHour4}
+        label="In approval"
+        value={approval}
+        color="yellow"
+        active={filter === "approval"}
+        onClick={toggle("approval")}
+      />
+      <StatCard
+        icon={IconPencil}
+        label="Open drafts"
+        value={drafts}
+        color="gray"
+        active={filter === "draft"}
+        onClick={toggle("draft")}
+      />
     </SimpleGrid>
   );
 }
@@ -207,6 +271,14 @@ export function DashboardPage() {
     queryFn: getOverview,
   });
   const [opened, { open, close }] = useDisclosure(false);
+  const [filter, setFilter] = useState<ProductFilter>(null);
+
+  const visible = products.filter((p) => {
+    if (filter === "stable") return !!p.last_stable;
+    if (filter === "approval") return !!p.under_approval;
+    if (filter === "draft") return !!p.draft;
+    return true;
+  });
 
   return (
     <Stack gap="lg">
@@ -239,12 +311,27 @@ export function DashboardPage() {
         </Card>
       ) : (
         <>
-          <SummaryBar products={products} />
-          <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="lg">
-            {products.map((p) => (
-              <ProductCard key={p.id} product={p} />
-            ))}
-          </SimpleGrid>
+          <SummaryBar products={products} filter={filter} onFilter={setFilter} />
+          {visible.length === 0 ? (
+            <Card padding="xl">
+              <EmptyState
+                icon={IconBox}
+                title="No matching products"
+                description="No products match the selected filter."
+                action={
+                  <Button mt="sm" variant="light" onClick={() => setFilter(null)}>
+                    Show all products
+                  </Button>
+                }
+              />
+            </Card>
+          ) : (
+            <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="lg">
+              {visible.map((p) => (
+                <ProductCard key={p.id} product={p} />
+              ))}
+            </SimpleGrid>
+          )}
         </>
       )}
     </Stack>

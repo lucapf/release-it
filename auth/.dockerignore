@@ -1,0 +1,6 @@
+# Deploy chart lives next to the source but is not part of the image.
+chart
+__pycache__
+*.pyc
+.venv
+.pytest_cache

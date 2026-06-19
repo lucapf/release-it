@@ -23,12 +23,18 @@ spec:
           imagePullPolicy: {{ .Values.auth.pullPolicy  }}
           env:
             - name: AUTH_DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@releaseit-auth-db:5432/{{ .Values.postgres.database }}"
+              value: "postgresql://{{ .Values.db.user }}:{{ .Values.db.password }}@{{ .Values.db.host }}:{{ .Values.db.port }}/{{ .Values.db.database }}"
+            - { name: AUTH_DB_POOL_MIN_SIZE, value: {{ .Values.auth.dbPool.minSize | quote }} }
+            - { name: AUTH_DB_POOL_MAX_SIZE, value: {{ .Values.auth.dbPool.maxSize | quote }} }
             - { name: AUTH_ISSUER, value: {{ .Values.auth.issuer | quote }} }
             - { name: AUTH_AUDIENCE, value: {{ .Values.auth.audience | quote }} }
+            - { name: AUTH_ACCESS_TOKEN_TTL_SECONDS, value: {{ .Values.auth.accessTokenTtlSeconds | quote }} }
+            - { name: AUTH_ROLE_CLAIM, value: {{ .Values.auth.roleClaim | quote }} }
             - { name: AUTH_PRIVATE_KEY_PEM, value: {{ .Values.auth.privateKeyPem | quote }} }
             - { name: AUTH_BOOTSTRAP_ADMIN_USERNAME, value: {{ .Values.auth.bootstrapAdmin.username | quote }} }
             - { name: AUTH_BOOTSTRAP_ADMIN_PASSWORD, value: {{ .Values.auth.bootstrapAdmin.password | quote }} }
+            - { name: AUTH_MIGRATIONS_DIR, value: {{ .Values.auth.migrationsDir | quote }} }
+            - { name: AUTH_CORS_ORIGINS, value: {{ .Values.auth.corsOrigins | quote }} }
           ports: [{ containerPort: 8001 }]
           readinessProbe:
             httpGet: { path: /health, port: 8001 }

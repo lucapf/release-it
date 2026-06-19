@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: releaseit-backend
+spec:
+  selector: { app: releaseit-backend }
+  ports: [{ port: 8000, targetPort: 8000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: releaseit-backend
+spec:
+  replicas: {{ .Values.replicas }}
+  selector: { matchLabels: { app: releaseit-backend } }
+  template:
+    metadata:
+      labels: { app: releaseit-backend }
+    spec:
+      containers:
+        - name: backend
+          image: {{ .Values.image }}
+          imagePullPolicy: {{ .Values.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.db.user }}:{{ .Values.db.password }}@{{ .Values.db.host }}:{{ .Values.db.port }}/{{ .Values.db.database }}"
+            - { name: DB_POOL_MIN_SIZE, value: {{ .Values.dbPool.minSize | quote }} }
+            - { name: DB_POOL_MAX_SIZE, value: {{ .Values.dbPool.maxSize | quote }} }
+            - { name: SOLUTION_ENABLED, value: {{ .Values.solutionEnabled | quote }} }
+            - { name: AUTH_ENABLED, value: {{ .Values.authEnabled | quote }} }
+            - { name: DEFAULT_TRANSITION_ROLES, value: {{ .Values.defaultTransitionRoles | quote }} }
+            - { name: REQUIRED_DOCS, value: {{ .Values.requiredDocs | quote }} }
+            - { name: CLOSED_BUG_STATUSES, value: {{ .Values.closedBugStatuses | quote }} }
+            - { name: JWT_ISSUER, value: {{ .Values.jwt.issuer | quote }} }
+            - { name: JWT_AUDIENCE, value: {{ .Values.jwt.audience | quote }} }
+            - { name: JWT_JWKS_URL, value: {{ .Values.jwt.jwksUrl | quote }} }
+            - { name: JWT_ROLE_CLAIM, value: {{ .Values.jwt.roleClaim | quote }} }
+            - { name: TRACKER_PROVIDER, value: {{ .Values.trackerProvider | quote }} }
+            - { name: JIRA_ENABLED, value: {{ .Values.integrations.jira.enabled | quote }} }
+            - { name: JIRA_BASE_URL, value: {{ .Values.integrations.jira.baseUrl | quote }} }
+            - { name: JIRA_TOKEN, value: {{ .Values.integrations.jira.token | quote }} }
+            - { name: GITHUB_ENABLED, value: {{ .Values.integrations.github.enabled | quote }} }
+            - { name: GITHUB_BASE_URL, value: {{ .Values.integrations.github.baseUrl | quote }} }
+            - { name: GITHUB_REPO, value: {{ .Values.integrations.github.repo | quote }} }
+            - { name: GITHUB_TOKEN, value: {{ .Values.integrations.github.token | quote }} }
+            - { name: LLM_PROVIDER, value: {{ .Values.llm.provider | quote }} }
+            - { name: CLAUDE_API_KEY, value: {{ .Values.llm.claude.apiKey | quote }} }
+            - { name: CLAUDE_MODEL, value: {{ .Values.llm.claude.model | quote }} }
+            - { name: OLLAMA_BASE_URL, value: {{ .Values.llm.ollama.baseUrl | quote }} }
+            - { name: OLLAMA_MODEL, value: {{ .Values.llm.ollama.model | quote }} }
+            - { name: GITLAB_ENABLED, value: {{ .Values.integrations.gitlab.enabled | quote }} }
+            - { name: GITLAB_BASE_URL, value: {{ .Values.integrations.gitlab.baseUrl | quote }} }
+            - { name: GITLAB_TOKEN, value: {{ .Values.integrations.gitlab.token | quote }} }
+            - { name: AWX_ENABLED, value: {{ .Values.integrations.awx.enabled | quote }} }
+            - { name: AWX_BASE_URL, value: {{ .Values.integrations.awx.baseUrl | quote }} }
+            - { name: AWX_TOKEN, value: {{ .Values.integrations.awx.token | quote }} }
+            - { name: CORS_ORIGINS, value: {{ .Values.corsOrigins | quote }} }
+          ports: [{ containerPort: 8000 }]
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }

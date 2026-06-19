@@ -146,6 +146,19 @@ class JiraIssue(BaseModel):
     synced_at: datetime
 
 
+class SyncFilter(BaseModel):
+    """The tracker filter an operator chose for a release, persisted so it can
+    be re-applied automatically. ``mode`` is one of ``milestone | label | jql``.
+    """
+    mode: str = Field(description="milestone | label | jql")
+    value: str = Field(default="", description="The filter value for the chosen mode")
+
+
+class SyncFilterView(SyncFilter):
+    release_id: int
+    updated_at: datetime
+
+
 # --- Runtime configuration -------------------------------------------------
 class JiraConfigView(BaseModel):
     enabled: bool = False
@@ -221,6 +234,7 @@ class WorkflowTransition(BaseModel):
     name: str
     target: str
     roles: list[str] = []  # roles permitted to perform this transition
+    requires: list[str] = []  # readiness guards (e.g. no_open_issues, docs_complete)
 
 
 class WorkflowState(BaseModel):
@@ -234,6 +248,24 @@ class Workflow(BaseModel):
     """The release state graph, so clients can render and gate the workflow."""
     initial_state: str
     states: list[WorkflowState] = []
+
+
+class WorkflowTransitionInput(BaseModel):
+    name: str
+    target: str
+    roles: list[str] = []
+    requires: list[str] = []
+
+
+class WorkflowStateInput(BaseModel):
+    name: str
+    transitions: list[WorkflowTransitionInput] = []
+
+
+class WorkflowUpdate(BaseModel):
+    """A complete replacement of the release workflow graph. The order of
+    ``states`` defines their scoring, so the first state is the initial one."""
+    states: list[WorkflowStateInput] = Field(..., min_length=1)
 
 
 class TransitionRoleUpdate(BaseModel):

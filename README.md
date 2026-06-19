@@ -11,26 +11,67 @@ description and [the architecture plan](.) for design rationale.
 | Backend API | FastAPI + psycopg3 (raw SQL, plain-SQL migrations via `sqlparse`) | [`backend/`](backend) |
 | Auth service | Separate FastAPI + psycopg3 project; issues RS256 JWTs + JWKS | [`auth/`](auth) |
 | Frontend | React + TypeScript + Vite | [`frontend/`](frontend) |
-| Storage | PostgreSQL 16 (files as `bytea`) | — |
-| Deploy | Docker images, Helm charts, docker-compose | [`deploy/`](deploy) |
+| Storage | A single PostgreSQL 16 instance, one schema + login role per service (files as `bytea`) | — |
+| Deploy | Docker images, per-service Helm charts + umbrella chart | [`deploy/`](deploy) |
 
 The backend is a **pure JWT resource server**: it validates Bearer tokens against
 a configurable provider's JWKS and maps a role claim to ReleaseIT roles. The
 bundled `releaseit-auth` is the default provider — it can be replaced by any
 OIDC/JWT engine (Keycloak, Auth0, …) purely via configuration.
 
-## Run locally (Docker)
+### Data segregation
 
-```bash
-cd deploy
-docker compose up --build
+Both services share **one** PostgreSQL instance and **one** database
+(`releaseit`). Each service is isolated into its own schema owned by its own
+login role, with that role's `search_path` pinned to its schema:
+
+| Service | Role | Schema |
+|---------|------|--------|
+| Backend | `releaseit` | `releaseit` |
+| Auth | `auth` | `auth` |
+
+Because each role only sees its own schema, the services' existing unqualified
+SQL and migrations need no changes. On the cluster the roles/schemas are created
+by the `releaseit-db` Helm chart's `initdb` script; for local-without-Docker
+runs, create them by hand (see [Run locally](#run-locally-without-docker)).
+
+### Deploy to Kubernetes
+
+Each service's Helm chart lives in a `chart/` directory next to its source code;
+a `release-it` **umbrella chart** pulls them together as subcharts:
+
+```
+auth/chart/           # releaseit-auth chart
+backend/chart/        # releaseit-backend chart
+frontend/chart/       # releaseit-frontend chart
+deploy/helm/
+  release-it/         # umbrella: depends on the four service charts
+  releaseit-db/       # single shared Postgres (schema + role per service)
 ```
 
-- Frontend:  http://localhost:8080  (default login `admin` / `admin`)
-- Backend:   http://localhost:8000/docs
-- Auth:      http://localhost:8001/docs  ·  JWKS at `/.well-known/jwks.json`
+One `helm` release brings up the whole stack (one shared Postgres + the three
+services):
+
+```bash
+./deploy/minikube-deploy.sh
+# builds images into minikube, then: helm upgrade --install release-it deploy/helm/release-it
+```
 
 ## Run locally (without Docker)
+
+First bring up a PostgreSQL 16 reachable on `localhost:5432` with a database
+named `releaseit`, then create the per-service roles + schemas (matching the
+app defaults):
+
+```sql
+CREATE ROLE releaseit LOGIN PASSWORD 'releaseit';
+CREATE SCHEMA releaseit AUTHORIZATION releaseit;
+ALTER ROLE releaseit SET search_path = releaseit;
+
+CREATE ROLE auth LOGIN PASSWORD 'auth';
+CREATE SCHEMA auth AUTHORIZATION auth;
+ALTER ROLE auth SET search_path = auth;
+```
 
 ```bash
 # Auth service (issues tokens)
