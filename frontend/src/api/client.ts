@@ -44,7 +44,9 @@ api.interceptors.response.use(
 );
 
 // --- Typed API helpers -----------------------------------------------------
-export interface Product { id: number; name: string; solution_id: number | null }
+export interface Product {
+  id: number; name: string; solution_id: number | null; tracker_repo: string;
+}
 export interface Release {
   id: number; product_id: number; version: string; state: string;
   short_description: string; parent_release_id: number | null;
@@ -97,7 +99,8 @@ export interface CheckTemplate { id: number; label: string; phase: Phase; create
 // --- Runtime configuration -------------------------------------------------
 export interface JiraConfigView { enabled: boolean; base_url: string; token_set: boolean }
 export interface GitHubConfigView {
-  enabled: boolean; base_url: string; repo: string; token_set: boolean;
+  // The repository is configured per-product (Product.tracker_repo), not here.
+  enabled: boolean; base_url: string; token_set: boolean;
 }
 export interface ClaudeConfigView { model: string; api_key_set: boolean }
 export interface OllamaConfigView { base_url: string; model: string }
@@ -115,7 +118,7 @@ export interface ConfigView {
 export interface ConfigUpdate {
   tracker_provider?: "jira" | "github";
   jira_enabled?: boolean; jira_base_url?: string; jira_token?: string;
-  github_enabled?: boolean; github_base_url?: string; github_repo?: string; github_token?: string;
+  github_enabled?: boolean; github_base_url?: string; github_token?: string;
   llm_provider?: "claude" | "ollama";
   claude_model?: string; claude_api_key?: string;
   ollama_base_url?: string; ollama_model?: string;
@@ -141,6 +144,8 @@ export const getProduct = (productId: number) =>
   api.get<Product>(`/api/v1/product/${productId}`).then((r) => r.data);
 export const createProduct = (name: string) =>
   api.post<Product>("/api/v1/product", { name }).then((r) => r.data);
+export const updateProduct = (productId: number, tracker_repo: string) =>
+  api.patch<Product>(`/api/v1/product/${productId}`, { tracker_repo }).then((r) => r.data);
 
 // --- Releases --------------------------------------------------------------
 export const listReleases = (productId: number) =>
@@ -208,7 +213,7 @@ export const listJiraIssues = (releaseId: number) =>
   api.get<JiraIssue[]>(`/api/v1/release/${releaseId}/jira/issues`).then((r) => r.data);
 export const syncJira = (
   releaseId: number,
-  filter: { release_label?: string; jql?: string }
+  filter: { release_label?: string; jql?: string; milestone?: string }
 ) => api.post<JiraIssue[]>(`/api/v1/release/${releaseId}/jira/sync`, filter).then((r) => r.data);
 
 // --- Environments ----------------------------------------------------------

@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ActionIcon,
+  Alert,
   Anchor,
   Badge,
   Button,
@@ -32,9 +33,12 @@ import {
   IconListDetails,
   IconRocket,
   IconTrash,
+  IconBrandGithub,
 } from "@tabler/icons-react";
 import {
   getProduct,
+  updateProduct,
+  getConfig,
   listReleases,
   createRelease,
   listDocumentation,
@@ -47,6 +51,7 @@ import {
   addCheck,
   setCheckDone,
   deleteCheck,
+  Product,
   Release,
   AuditEntry,
   Phase,
@@ -260,23 +265,84 @@ function DocumentationTab({ releaseId }: { releaseId: number }) {
   );
 }
 
-// --- Jira tab --------------------------------------------------------------
-function JiraTab({ releaseId }: { releaseId: number }) {
+// --- Per-product repository binding (GitHub) --------------------------------
+function RepoBinding({ product, canEdit }: { product: Product; canEdit: boolean }) {
+  const qc = useQueryClient();
+  const [repo, setRepo] = useState(product.tracker_repo);
+  useEffect(() => setRepo(product.tracker_repo), [product.tracker_repo]);
+
+  const save = useMutation({
+    mutationFn: () => updateProduct(product.id, repo.trim()),
+    onSuccess: (p) => {
+      qc.setQueryData(["product", product.id], p);
+      qc.invalidateQueries({ queryKey: ["overview"] });
+      notifications.show({ message: "Repository updated", color: "teal" });
+    },
+    onError: (e: any) => notifyApiError(e, "Could not update repository"),
+  });
+
+  const dirty = repo.trim() !== product.tracker_repo;
+  return (
+    <Group align="flex-end" gap="sm" mb="sm">
+      <TextInput
+        label="Repository (this product)"
+        description="GitHub owner/repo this product's issues live in"
+        placeholder="owner/repo"
+        leftSection={<IconBrandGithub size={15} />}
+        value={repo}
+        onChange={(e) => setRepo(e.currentTarget.value)}
+        disabled={!canEdit}
+        style={{ flex: 1 }}
+      />
+      {canEdit && (
+        <Button variant="light" disabled={!dirty} loading={save.isPending} onClick={() => save.mutate()}>
+          Save repo
+        </Button>
+      )}
+    </Group>
+  );
+}
+
+// --- Issues tab (tracker-aware: Jira or GitHub) ----------------------------
+function JiraTab({
+  releaseId,
+  product,
+  version,
+}: {
+  releaseId: number;
+  product: Product;
+  version: string;
+}) {
   const qc = useQueryClient();
   const { hasRole } = useAuth();
   const canSync = hasRole("Developer", "Release Manager", "Administrator");
   const key = ["jira", releaseId];
   const { data: issues = [] } = useQuery({ queryKey: key, queryFn: () => listJiraIssues(releaseId) });
-  const [mode, setMode] = useState<"label" | "jql">("label");
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: getConfig });
+
+  const provider = cfg?.tracker_provider ?? "jira";
+  const isGitHub = provider === "github";
+  const trackerName = isGitHub ? "GitHub" : "Jira";
+  const repoMissing = isGitHub && !product.tracker_repo.trim();
+
+  // GitHub filters by milestone (default) or label; Jira by label or raw JQL.
+  const [ghMode, setGhMode] = useState<"milestone" | "label">("milestone");
+  const [jiraMode, setJiraMode] = useState<"label" | "jql">("label");
+  const [milestone, setMilestone] = useState("");
   const [label, setLabel] = useState("");
   const [jql, setJql] = useState("");
 
   const sync = useMutation({
-    mutationFn: () => syncJira(releaseId, mode === "jql" ? { jql } : { release_label: label }),
+    mutationFn: () => {
+      if (isGitHub) {
+        return syncJira(releaseId, ghMode === "label" ? { release_label: label } : { milestone });
+      }
+      return syncJira(releaseId, jiraMode === "jql" ? { jql } : { release_label: label });
+    },
     onSuccess: (data) => {
       qc.setQueryData(key, data);
       qc.invalidateQueries({ queryKey: ["status", releaseId] });
-      notifications.show({ message: `Synced ${data.length} issue(s) from Jira`, color: "teal" });
+      notifications.show({ message: `Synced ${data.length} issue(s) from ${trackerName}`, color: "teal" });
     },
     onError: (e: any) => notifyApiError(e, "Issue sync failed"),
   });
@@ -286,47 +352,98 @@ function JiraTab({ releaseId }: { releaseId: number }) {
       {canSync && (
         <Card withBorder padding="md">
           <Group justify="space-between" mb="xs">
-            <Title order={5}>Sync issues from the active tracker</Title>
-            <Badge variant="dot" color="gray">Jira / GitHub · configurable</Badge>
+            <Title order={5}>Sync issues from {trackerName}</Title>
+            <Badge
+              variant="light"
+              color={isGitHub ? "dark" : "blue"}
+              leftSection={isGitHub ? <IconBrandGithub size={12} /> : undefined}
+            >
+              active tracker: {trackerName}
+            </Badge>
           </Group>
           <Text size="sm" c="dimmed" mb="sm">
-            Fetch the issues contained in this release from the configured tracker.
-            Filter by a release label, or provide a custom query. Re-syncing
-            ("refresh") marks the stubbed issues as Done.
+            {isGitHub
+              ? "Fetch the issues for this release from GitHub. By default they are matched by the milestone named after the release version; you can also filter by a label."
+              : "Fetch the issues for this release from Jira. Filter by a release label, or provide a custom JQL query."}
           </Text>
-          <Group align="flex-end" gap="sm">
-            <Select
-              label="Filter by"
-              data={[
-                { value: "label", label: "Release label" },
-                { value: "jql", label: "Custom JQL" },
-              ]}
-              value={mode}
-              onChange={(v) => setMode((v as "label" | "jql") ?? "label")}
-              maw={160}
-              allowDeselect={false}
-            />
-            {mode === "label" ? (
-              <TextInput
-                label="Release label"
-                placeholder="e.g. 2025-Q3"
-                value={label}
-                onChange={(e) => setLabel(e.currentTarget.value)}
-                style={{ flex: 1 }}
-              />
-            ) : (
-              <TextInput
-                label="JQL query"
-                placeholder='project = REL AND fixVersion = "1.2.0"'
-                value={jql}
-                onChange={(e) => setJql(e.currentTarget.value)}
-                style={{ flex: 1 }}
-              />
-            )}
-            <Button loading={sync.isPending} onClick={() => sync.mutate()}>
-              Sync now
-            </Button>
-          </Group>
+
+          {isGitHub && <RepoBinding product={product} canEdit={canSync} />}
+
+          {repoMissing ? (
+            <Alert color="orange" variant="light">
+              Set this product's GitHub repository above before syncing.
+            </Alert>
+          ) : (
+            <Group align="flex-end" gap="sm">
+              {isGitHub ? (
+                <>
+                  <Select
+                    label="Filter by"
+                    data={[
+                      { value: "milestone", label: "Milestone" },
+                      { value: "label", label: "Label" },
+                    ]}
+                    value={ghMode}
+                    onChange={(v) => setGhMode((v as "milestone" | "label") ?? "milestone")}
+                    maw={150}
+                    allowDeselect={false}
+                  />
+                  {ghMode === "milestone" ? (
+                    <TextInput
+                      label="Milestone"
+                      placeholder={version || "e.g. 0.1.0"}
+                      description={`Defaults to the release version (${version})`}
+                      value={milestone}
+                      onChange={(e) => setMilestone(e.currentTarget.value)}
+                      style={{ flex: 1 }}
+                    />
+                  ) : (
+                    <TextInput
+                      label="Label"
+                      placeholder="e.g. release/0.1.0"
+                      value={label}
+                      onChange={(e) => setLabel(e.currentTarget.value)}
+                      style={{ flex: 1 }}
+                    />
+                  )}
+                </>
+              ) : (
+                <>
+                  <Select
+                    label="Filter by"
+                    data={[
+                      { value: "label", label: "Release label" },
+                      { value: "jql", label: "Custom JQL" },
+                    ]}
+                    value={jiraMode}
+                    onChange={(v) => setJiraMode((v as "label" | "jql") ?? "label")}
+                    maw={160}
+                    allowDeselect={false}
+                  />
+                  {jiraMode === "label" ? (
+                    <TextInput
+                      label="Release label"
+                      placeholder="e.g. 2025-Q3"
+                      value={label}
+                      onChange={(e) => setLabel(e.currentTarget.value)}
+                      style={{ flex: 1 }}
+                    />
+                  ) : (
+                    <TextInput
+                      label="JQL query"
+                      placeholder='project = REL AND fixVersion = "1.2.0"'
+                      value={jql}
+                      onChange={(e) => setJql(e.currentTarget.value)}
+                      style={{ flex: 1 }}
+                    />
+                  )}
+                </>
+              )}
+              <Button loading={sync.isPending} onClick={() => sync.mutate()}>
+                Sync now
+              </Button>
+            </Group>
+          )}
         </Card>
       )}
 
@@ -632,7 +749,15 @@ export function ProductDetailPage() {
         </Tabs.Panel>
 
         <Tabs.Panel value="issues" pt="md">
-          {activeId ? <JiraTab releaseId={activeId} /> : needsRelease("sync tracker issues")}
+          {activeId && product ? (
+            <JiraTab
+              releaseId={activeId}
+              product={product}
+              version={activeRelease?.version ?? ""}
+            />
+          ) : (
+            needsRelease("sync tracker issues")
+          )}
         </Tabs.Panel>
 
         <Tabs.Panel value="history" pt="md">

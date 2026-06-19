@@ -151,7 +151,6 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
   const [jiraToken, setJiraToken] = useState("");
   const [ghEnabled, setGhEnabled] = useState(false);
   const [ghUrl, setGhUrl] = useState("");
-  const [ghRepo, setGhRepo] = useState("");
   const [ghToken, setGhToken] = useState("");
 
   // Seed local form state once the current config loads.
@@ -162,7 +161,6 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
     setJiraUrl(cfg.jira.base_url);
     setGhEnabled(cfg.github.enabled);
     setGhUrl(cfg.github.base_url);
-    setGhRepo(cfg.github.repo);
   }, [cfg]);
 
   const save = useMutation({
@@ -173,7 +171,6 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
         jira_base_url: jiraUrl,
         github_enabled: ghEnabled,
         github_base_url: ghUrl,
-        github_repo: ghRepo,
       };
       if (jiraToken) body.jira_token = jiraToken; // write-only: blank = keep existing
       if (ghToken) body.github_token = ghToken;
@@ -270,13 +267,9 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
             onChange={(e) => setGhUrl(e.currentTarget.value)}
             disabled={!canEdit}
           />
-          <TextInput
-            label="Repository"
-            placeholder="owner/repo"
-            value={ghRepo}
-            onChange={(e) => setGhRepo(e.currentTarget.value)}
-            disabled={!canEdit}
-          />
+          <Text size="xs" c="dimmed">
+            The repository is configured per product, on each product's Issues tab.
+          </Text>
           <PasswordInput
             label="Access token"
             placeholder={cfg.github.token_set ? "•••••••• (stored)" : "not set"}

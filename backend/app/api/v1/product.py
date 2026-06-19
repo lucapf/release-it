@@ -13,7 +13,13 @@ from app.core.jwt_verify import (
 from app.db.pool import get_conn
 from app.repositories import products as repo
 from app.repositories import releases as releases_repo
-from app.schemas.models import Product, ProductCreate, ProductOverview, Release
+from app.schemas.models import (
+    Product,
+    ProductCreate,
+    ProductOverview,
+    ProductUpdate,
+    Release,
+)
 
 router = APIRouter()
 
@@ -33,12 +39,24 @@ def products_overview(conn: psycopg.Connection = Depends(get_conn)):
 @router.post("", response_model=Product, status_code=201,
              dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
 def create_product(body: ProductCreate, conn: psycopg.Connection = Depends(get_conn)):
-    return repo.create(conn, body.name, body.solution_id)
+    return repo.create(conn, body.name, body.solution_id, body.tracker_repo)
 
 
 @router.get("/{product_id}", response_model=Product)
 def get_product(product_id: int, conn: psycopg.Connection = Depends(get_conn)):
     row = repo.get(conn, product_id)
+    if row is None:
+        raise HTTPException(404, "Product not found")
+    return row
+
+
+@router.patch("/{product_id}", response_model=Product,
+              dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+def update_product(
+    product_id: int, body: ProductUpdate, conn: psycopg.Connection = Depends(get_conn)
+):
+    """Update the product's issue-tracker project (e.g. the GitHub repository)."""
+    row = repo.update(conn, product_id, body.tracker_repo.strip())
     if row is None:
         raise HTTPException(404, "Product not found")
     return row
