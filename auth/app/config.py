@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # fresh deployment can't be taken over with guessable credentials.
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: str = ""
+    # Escape hatch for local/dev only: when true, the guard against weak/guessable
+    # bootstrap passwords is skipped so trivial credentials (e.g. admin/admin) can
+    # be seeded. Never enable this in a real deployment.
+    allow_insecure_bootstrap: bool = False
 
     migrations_dir: str = "migrations"
     cors_origins: str = "*"

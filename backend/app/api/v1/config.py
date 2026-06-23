@@ -17,6 +17,8 @@ from app.schemas.models import (
     ClaudeConfigView,
     ConfigUpdate,
     ConfigView,
+    DocumentType,
+    DocumentTypeCreate,
     GitHubConfigView,
     JiraConfigView,
     LLMConfigView,
@@ -167,3 +169,27 @@ def add_check_template(body: CheckTemplateCreate, conn: psycopg.Connection = Dep
 def delete_check_template(template_id: int, conn: psycopg.Connection = Depends(get_conn)):
     if not repo.delete_check_template(conn, template_id):
         raise HTTPException(404, "Check template not found")
+
+
+# --- Supported document types ----------------------------------------------
+@router.get("/document-types", response_model=list[DocumentType])
+def list_document_types(conn: psycopg.Connection = Depends(get_conn)):
+    return repo.list_document_types(conn)
+
+
+@router.post("/document-types", response_model=DocumentType, status_code=201,
+             dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+def add_document_type(body: DocumentTypeCreate, conn: psycopg.Connection = Depends(get_conn)):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Document type name must not be empty")
+    if name in repo.document_type_names(conn):
+        raise HTTPException(409, f'A document type named "{name}" already exists')
+    return repo.add_document_type(conn, name)
+
+
+@router.delete("/document-types/{type_id}", status_code=204,
+               dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+def delete_document_type(type_id: int, conn: psycopg.Connection = Depends(get_conn)):
+    if not repo.delete_document_type(conn, type_id):
+        raise HTTPException(404, "Document type not found")

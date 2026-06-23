@@ -20,6 +20,13 @@ function unmetRequirements(
     reasons.push(`missing docs: ${status.missing_docs.join(", ")}`);
   if (requires.includes("checks_done") && status.pending_checks > 0)
     reasons.push(`${status.pending_checks} check(s) pending`);
+  // Parameterised guard: document:<TypeName> needs an uploaded document of that type.
+  const present = new Set(status.present_doc_types ?? []);
+  requires
+    .filter((r) => r.startsWith("document:"))
+    .map((r) => r.slice("document:".length))
+    .filter((docType) => !present.has(docType))
+    .forEach((docType) => reasons.push(`missing document: ${docType}`));
   return reasons;
 }
 

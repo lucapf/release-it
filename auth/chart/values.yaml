@@ -14,6 +14,9 @@ auth:
     # --set auth.bootstrapAdmin.password=... or via a secret. The service
     # refuses to seed the admin with a missing/guessable password.
     password: ""
+    # Dev-only: skip the weak-password guard so trivial creds (admin/admin) can
+    # be seeded. Leave false for any real deployment.
+    allowInsecure: false
   migrationsDir: "migrations"
   corsOrigins: "*"
   dbPool:

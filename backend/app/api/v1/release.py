@@ -19,6 +19,7 @@ from app.db.pool import get_conn
 from app.integrations import llm, trackers
 from app.integrations.pipeline import get_runner
 from app.repositories import config as config_repo
+from app.repositories import documents as documents_repo
 from app.repositories import jira_issues as jira_repo
 from app.repositories import products as products_repo
 from app.repositories import releases as repo
@@ -43,7 +44,12 @@ from app.schemas.models import (
     TransitionRequest,
 )
 from app.services import audit
-from app.services.state_machine import StateError, StateMachine
+from app.services.state_machine import (
+    StateError,
+    StateMachine,
+    document_guard_type,
+    is_document_guard,
+)
 
 router = APIRouter()
 
@@ -100,6 +106,8 @@ def _compute_status(conn: psycopg.Connection, rel: dict) -> ReleaseStatusSummary
     checks = repo.list_checks(conn, release_id)
     pending = sum(1 for c in checks if not c["done"])
 
+    present_doc_types = documents_repo.present_types(conn, release_id)
+
     return ReleaseStatusSummary(
         release_id=release_id,
         state=rel["state"],
@@ -107,6 +115,7 @@ def _compute_status(conn: psycopg.Connection, rel: dict) -> ReleaseStatusSummary
         open_bugs=open_bugs,
         required_docs=required,
         missing_docs=missing,
+        present_doc_types=sorted(present_doc_types),
         pending_checks=pending,
         total_checks=len(checks),
         is_ready=not open_bugs and not missing and pending == 0,
@@ -129,6 +138,12 @@ def _unmet_requirements(requires: frozenset[str], status: ReleaseStatusSummary) 
         reasons.append(
             f"{status.pending_checks} checklist item(s) still pending"
         )
+    present = set(status.present_doc_types)
+    for guard in requires:
+        if is_document_guard(guard):
+            doc_type = document_guard_type(guard)
+            if doc_type not in present:
+                reasons.append(f'missing required document: "{doc_type}"')
     return reasons
 
 

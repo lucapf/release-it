@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
@@ -8,6 +8,7 @@ import {
   Badge,
   Button,
   Card,
+  Collapse,
   Group,
   Loader,
   Modal,
@@ -22,15 +23,19 @@ import {
   Text,
   TextInput,
   Title,
+  Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
   IconArrowDown,
   IconArrowUp,
+  IconChevronDown,
+  IconChevronRight,
   IconDownload,
   IconPencil,
   IconPlus,
   IconTrash,
+  IconVersions,
 } from "@tabler/icons-react";
 import {
   getConfig,
@@ -41,6 +46,10 @@ import {
   listCheckTemplates,
   addCheckTemplate,
   deleteCheckTemplate,
+  listDocumentTypes,
+  addDocumentType,
+  deleteDocumentType,
+  DocumentType,
   getOverview,
   updateProduct,
   deleteProduct,
@@ -59,6 +68,11 @@ import { useAuth } from "../auth/AuthContext";
 import { notifyApiError } from "../lib/errors";
 
 // --- Workflow: full graph editor (states + transitions) + YAML export -------
+// The starting state and the terminal outcomes are structural: they cannot be
+// deleted from the graph (the backend always expects them to exist).
+const INITIAL_STATE = "Draft";
+const PROTECTED_STATES = new Set([INITIAL_STATE, "Rejected", "Approved"]);
+
 const toEditable = (wf: Workflow): WorkflowStateInput[] =>
   [...wf.states]
     .sort((a, b) => a.score - b.score)
@@ -79,6 +93,9 @@ function validateGraph(states: WorkflowStateInput[]): string | null {
   const names = states.map((s) => s.name.trim());
   if (names.some((n) => !n)) return "Every state needs a name.";
   if (new Set(names).size !== names.length) return "State names must be unique.";
+  for (const required of PROTECTED_STATES) {
+    if (!names.includes(required)) return `The “${required}” state is required and cannot be removed.`;
+  }
   const known = new Set(names);
   for (const s of states) {
     const seen = new Set<string>();
@@ -105,12 +122,42 @@ function downloadYaml(text: string) {
 function WorkflowSection({ canEdit }: { canEdit: boolean }) {
   const qc = useQueryClient();
   const { data: workflow, isLoading } = useQuery({ queryKey: ["workflow"], queryFn: getWorkflow });
+  // Document types feed the parameterised `document:<type>` readiness guards.
+  const { data: docTypes = [] } = useQuery({ queryKey: ["document-types"], queryFn: listDocumentTypes });
+  // Guard options for the readiness MultiSelect: the fixed guards plus one
+  // `document:<type>` entry per configured document type.
+  const guardData = useMemo(() => {
+    const groups: { group: string; items: { value: string; label: string }[] }[] = [
+      { group: "General", items: GUARDS.map((g) => ({ value: g, label: g })) },
+    ];
+    if (docTypes.length) {
+      groups.push({
+        group: "Required document",
+        items: docTypes.map((t) => ({ value: `document:${t.name}`, label: `Document: ${t.name}` })),
+      });
+    }
+    return groups;
+  }, [docTypes]);
 
   // The editable graph, seeded from the server and mutated locally until saved.
   const [states, setStates] = useState<WorkflowStateInput[]>([]);
+  // Indices of state cards whose transitions are collapsed (default: expanded).
+  // Kept in sync with `states` as cards are reordered/removed below.
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   useEffect(() => {
-    if (workflow) setStates(toEditable(workflow));
+    if (!workflow) return;
+    const editable = toEditable(workflow);
+    setStates(editable);
+    // Cards start collapsed; the admin expands the ones they want to edit.
+    setCollapsed(new Set(editable.map((_, i) => i)));
   }, [workflow]);
+
+  const toggleCollapsed = (i: number) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(i) ? next.delete(i) : next.add(i);
+      return next;
+    });
 
   // Immutable update of one state by index.
   const patchState = (i: number, fn: (s: WorkflowStateInput) => WorkflowStateInput) =>
@@ -125,14 +172,39 @@ function WorkflowSection({ canEdit }: { canEdit: boolean }) {
       transitions: s.transitions.map((t, idx) => (idx === ti ? { ...t, ...patch } : t)),
     }));
 
-  const moveState = (i: number, dir: -1 | 1) =>
+  const moveState = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= states.length) return;
     setStates((prev) => {
-      const j = i + dir;
-      if (j < 0 || j >= prev.length) return prev;
       const next = [...prev];
       [next[i], next[j]] = [next[j], next[i]];
       return next;
     });
+    // Keep the collapsed flags attached to their cards as they swap places.
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      const hi = prev.has(i);
+      const hj = prev.has(j);
+      next.delete(i);
+      next.delete(j);
+      if (hj) next.add(i);
+      if (hi) next.add(j);
+      return next;
+    });
+  };
+
+  // Remove a state and shift the collapsed flags of the cards after it.
+  const removeState = (si: number) => {
+    setStates((prev) => prev.filter((_, idx) => idx !== si));
+    setCollapsed((prev) => {
+      const next = new Set<number>();
+      prev.forEach((idx) => {
+        if (idx < si) next.add(idx);
+        else if (idx > si) next.add(idx - 1);
+      });
+      return next;
+    });
+  };
 
   const save = useMutation({
     mutationFn: () => updateWorkflow(states),
@@ -181,8 +253,9 @@ function WorkflowSection({ canEdit }: { canEdit: boolean }) {
         </Group>
       </Group>
       <Text c="dimmed" size="sm" mb="md">
-        Database-backed state graph. The first state is the initial one
-        (<b>{states[0]?.name || "—"}</b>); a state with no transitions is final.{" "}
+        Database-backed state graph. <b>{INITIAL_STATE}</b> is the starting state and
+        a state with no transitions is final; <b>{INITIAL_STATE}</b>, <b>Rejected</b> and{" "}
+        <b>Approved</b> are structural and cannot be removed.{" "}
         {canEdit
           ? "Edit states, transitions, roles and readiness guards below."
           : "Administrators can edit the workflow."} Use <b>Export YAML</b> to download a{" "}
@@ -195,8 +268,28 @@ function WorkflowSection({ canEdit }: { canEdit: boolean }) {
 
       <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
         {states.map((s, si) => (
-          <Card key={si} withBorder radius="md" padding="sm" bg="var(--mantine-color-gray-0)">
+          <Card
+            key={si}
+            withBorder
+            radius="md"
+            padding="sm"
+            bg={s.name === INITIAL_STATE ? "var(--mantine-color-blue-0)" : "var(--mantine-color-gray-0)"}
+            style={
+              s.name === INITIAL_STATE
+                ? { borderColor: "var(--mantine-color-blue-4)" }
+                : undefined
+            }
+          >
             <Group justify="space-between" wrap="nowrap" mb="xs">
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                aria-label={collapsed.has(si) ? "Expand state" : "Collapse state"}
+                onClick={() => toggleCollapsed(si)}
+              >
+                {collapsed.has(si) ? <IconChevronRight size={16} /> : <IconChevronDown size={16} />}
+              </ActionIcon>
               <TextInput
                 value={s.name}
                 onChange={(e) => patchState(si, (st) => ({ ...st, name: e.currentTarget.value }))}
@@ -205,8 +298,8 @@ function WorkflowSection({ canEdit }: { canEdit: boolean }) {
                 placeholder="State name"
                 style={{ flex: 1 }}
                 rightSection={
-                  si === 0 ? (
-                    <Badge size="xs" color="blue" variant="light">initial</Badge>
+                  s.name === INITIAL_STATE ? (
+                    <Badge size="xs" color="blue" variant="filled">start</Badge>
                   ) : s.transitions.length === 0 ? (
                     <Badge size="xs" color="gray" variant="light">final</Badge>
                   ) : null
@@ -224,13 +317,36 @@ function WorkflowSection({ canEdit }: { canEdit: boolean }) {
                     <IconArrowDown size={15} />
                   </ActionIcon>
                   <ActionIcon variant="subtle" color="red" size="sm" aria-label="Delete state"
-                    onClick={() => setStates((prev) => prev.filter((_, idx) => idx !== si))}>
+                    disabled={PROTECTED_STATES.has(s.name)}
+                    title={PROTECTED_STATES.has(s.name) ? "This state cannot be removed" : undefined}
+                    onClick={() => removeState(si)}>
                     <IconTrash size={15} />
                   </ActionIcon>
                 </Group>
               )}
             </Group>
 
+            {collapsed.has(si) && (
+              s.transitions.length === 0 ? (
+                <Text size="xs" c="dimmed">No outgoing transitions (final state).</Text>
+              ) : (
+                <Group gap={6} wrap="wrap">
+                  {s.transitions.map((t, ti) => (
+                    <Badge
+                      key={ti}
+                      variant="light"
+                      color="gray"
+                      size="sm"
+                      style={{ textTransform: "none" }}
+                    >
+                      {(t.name || "(unnamed)") + " → " + (t.target || "?")}
+                    </Badge>
+                  ))}
+                </Group>
+              )
+            )}
+
+            <Collapse in={!collapsed.has(si)}>
             <Stack gap="sm">
               {s.transitions.length === 0 ? (
                 <Text size="xs" c="dimmed">No outgoing transitions (final state).</Text>
@@ -280,7 +396,7 @@ function WorkflowSection({ canEdit }: { canEdit: boolean }) {
                       mb={6}
                     />
                     <MultiSelect
-                      data={GUARDS}
+                      data={guardData}
                       value={t.requires}
                       onChange={(v) => patchTransition(si, ti, { requires: v })}
                       disabled={!canEdit}
@@ -306,6 +422,7 @@ function WorkflowSection({ canEdit }: { canEdit: boolean }) {
                 </Button>
               )}
             </Stack>
+            </Collapse>
           </Card>
         ))}
       </SimpleGrid>
@@ -676,6 +793,93 @@ function CheckTemplatesSection({ canEdit }: { canEdit: boolean }) {
   );
 }
 
+// --- Document types: admin-managed supported document types ----------------
+function DocumentTypesSection({ canEdit }: { canEdit: boolean }) {
+  const qc = useQueryClient();
+  const key = ["document-types"];
+  const { data: types = [], isLoading } = useQuery({ queryKey: key, queryFn: listDocumentTypes });
+  const [name, setName] = useState("");
+  const invalidate = () => qc.invalidateQueries({ queryKey: key });
+
+  const add = useMutation({
+    mutationFn: () => addDocumentType(name.trim()),
+    onSuccess: () => { setName(""); invalidate(); notifications.show({ message: "Document type added", color: "teal" }); },
+    onError: (e: any) => notifyApiError(e, "Could not add document type"),
+  });
+  const remove = useMutation({
+    mutationFn: (id: number) => deleteDocumentType(id),
+    onSuccess: (_d, id) => {
+      // Drop the deleted type from the cache immediately so the list updates
+      // without waiting on a refetch (and the badge can't be clicked twice),
+      // then reconcile with the server.
+      qc.setQueryData<DocumentType[]>(key, (old) => old?.filter((t) => t.id !== id));
+      invalidate();
+    },
+    onError: (e: any) => notifyApiError(e, "Could not delete document type"),
+  });
+
+  return (
+    <Card withBorder radius="md" padding="lg">
+      <Title order={4} mb={4}>Document types</Title>
+      <Text c="dimmed" size="sm" mb="md">
+        The supported types operators can mark uploaded documents with. Removing a
+        type leaves already-classified documents untouched.
+      </Text>
+
+      {isLoading ? (
+        <Loader />
+      ) : types.length === 0 ? (
+        <Text c="dimmed" size="sm" mb="md">No document types configured.</Text>
+      ) : (
+        <Group gap="xs" mb="md" wrap="wrap">
+          {types.map((t) => (
+            <Badge
+              key={t.id}
+              size="lg"
+              variant="light"
+              color="grape"
+              pr={canEdit ? 3 : undefined}
+              rightSection={
+                canEdit ? (
+                  <ActionIcon
+                    size="xs"
+                    color="grape"
+                    variant="transparent"
+                    aria-label={`Delete ${t.name}`}
+                    loading={remove.isPending && remove.variables === t.id}
+                    disabled={remove.isPending}
+                    onClick={() => remove.mutate(t.id)}
+                  >
+                    <IconTrash size={12} />
+                  </ActionIcon>
+                ) : undefined
+              }
+            >
+              {t.name}
+            </Badge>
+          ))}
+        </Group>
+      )}
+
+      {canEdit && (
+        <Group align="flex-end" gap="sm">
+          <TextInput
+            label="New type"
+            placeholder="e.g. Security Review"
+            value={name}
+            onChange={(e) => setName(e.currentTarget.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) add.mutate(); }}
+            style={{ flex: 1 }}
+          />
+          <Button disabled={!name.trim()} loading={add.isPending} onClick={() => add.mutate()}>
+            Add type
+          </Button>
+        </Group>
+      )}
+    </Card>
+  );
+}
+
 // --- Projects: per-project settings + lifecycle ----------------------------
 function EditProjectModal({
   project,
@@ -874,7 +1078,7 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
       <Text c="dimmed" size="sm" mb="md">
         Manage each project's standard configuration — its name and the issue-tracker
         project its issues are synced from — or remove a project. {canEdit
-          ? "Click a project's release count to manage and delete its releases."
+          ? "Use the releases icon (or click a project's release count) to manage and delete its releases."
           : ""}
       </Text>
 
@@ -921,16 +1125,32 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
                     <Table.Td>
                       <Group gap={4} wrap="nowrap">
                         {canEdit && (
-                          <ActionIcon variant="subtle" color="gray" aria-label="Edit project"
-                            onClick={() => setEditing(p)}>
-                            <IconPencil size={16} />
-                          </ActionIcon>
+                          <Tooltip
+                            label={p.release_count > 0 ? "Manage / delete releases" : "No releases yet"}
+                            withArrow
+                          >
+                            <ActionIcon variant="subtle" color="gray" aria-label="Manage releases"
+                              disabled={p.release_count === 0}
+                              onClick={() => setManaging(p)}>
+                              <IconVersions size={16} />
+                            </ActionIcon>
+                          </Tooltip>
+                        )}
+                        {canEdit && (
+                          <Tooltip label="Edit project" withArrow>
+                            <ActionIcon variant="subtle" color="gray" aria-label="Edit project"
+                              onClick={() => setEditing(p)}>
+                              <IconPencil size={16} />
+                            </ActionIcon>
+                          </Tooltip>
                         )}
                         {canDelete && (
-                          <ActionIcon variant="subtle" color="red" aria-label="Delete project"
-                            onClick={() => setDeleting(p)}>
-                            <IconTrash size={16} />
-                          </ActionIcon>
+                          <Tooltip label="Delete project" withArrow>
+                            <ActionIcon variant="subtle" color="red" aria-label="Delete project"
+                              onClick={() => setDeleting(p)}>
+                              <IconTrash size={16} />
+                            </ActionIcon>
+                          </Tooltip>
                         )}
                       </Group>
                     </Table.Td>
@@ -952,6 +1172,7 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
 const SECTIONS = [
   { id: "projects", label: "Projects" },
   { id: "checks", label: "Default checks" },
+  { id: "document-types", label: "Document types" },
   { id: "workflow", label: "Release workflow" },
   { id: "tracker", label: "Issue tracker" },
   { id: "llm", label: "LLM engine" },
@@ -974,7 +1195,7 @@ export function ConfigurationPage() {
     <Stack gap="lg">
       <div>
         <Title order={2}>Configuration</Title>
-        <Text c="dimmed">Projects, default checks, release workflow, issue tracker and LLM engine.</Text>
+        <Text c="dimmed">Projects, default checks, document types, release workflow, issue tracker and LLM engine.</Text>
       </div>
 
       <Card withBorder radius="md" padding="sm">
@@ -998,6 +1219,9 @@ export function ConfigurationPage() {
       </div>
       <div id="checks" style={anchorStyle}>
         <CheckTemplatesSection canEdit={canManageChecks} />
+      </div>
+      <div id="document-types" style={anchorStyle}>
+        <DocumentTypesSection canEdit={canManageChecks} />
       </div>
       <div id="workflow" style={anchorStyle}>
         <WorkflowSection canEdit={isAdmin} />

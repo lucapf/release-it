@@ -33,6 +33,7 @@ spec:
             - { name: AUTH_PRIVATE_KEY_PEM, value: {{ .Values.auth.privateKeyPem | quote }} }
             - { name: AUTH_BOOTSTRAP_ADMIN_USERNAME, value: {{ .Values.auth.bootstrapAdmin.username | quote }} }
             - { name: AUTH_BOOTSTRAP_ADMIN_PASSWORD, value: {{ .Values.auth.bootstrapAdmin.password | quote }} }
+            - { name: AUTH_ALLOW_INSECURE_BOOTSTRAP, value: {{ .Values.auth.bootstrapAdmin.allowInsecure | default false | quote }} }
             - { name: AUTH_MIGRATIONS_DIR, value: {{ .Values.auth.migrationsDir | quote }} }
             - { name: AUTH_CORS_ORIGINS, value: {{ .Values.auth.corsOrigins | quote }} }
           ports: [{ containerPort: 8001 }]

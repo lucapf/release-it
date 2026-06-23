@@ -42,6 +42,21 @@ class State:
 # evaluated by the release API (see release._unmet_requirements).
 KNOWN_GUARDS = frozenset({"no_open_issues", "docs_complete", "checks_done"})
 
+# Parameterised guard: ``document:<TypeName>`` requires that at least one document
+# of that type has been uploaded to the release before the transition is allowed.
+# The <TypeName> is one of the admin-configured document types.
+DOCUMENT_GUARD_PREFIX = "document:"
+
+
+def is_document_guard(guard: str) -> bool:
+    return guard.startswith(DOCUMENT_GUARD_PREFIX)
+
+
+def document_guard_type(guard: str) -> str:
+    """The document type named by a ``document:<TypeName>`` guard."""
+    return guard[len(DOCUMENT_GUARD_PREFIX):]
+
+
 # Prepended to exported YAML so a downloaded states.yaml keeps its bearings.
 _YAML_HEADER = (
     "# Release state graph (acyclic). Position defines the score / ordering.\n"
@@ -49,7 +64,8 @@ _YAML_HEADER = (
     "#\n"
     "# Exported from the database-backed workflow. Each transition may declare\n"
     "# `roles` (who may perform it) and `requires` (readiness guards:\n"
-    "# no_open_issues, docs_complete, checks_done).\n"
+    "# no_open_issues, docs_complete, checks_done, or document:<TypeName> to\n"
+    "# require an uploaded document of that type).\n"
 )
 
 

@@ -121,6 +121,50 @@ class DocumentationMeta(BaseModel):
     created_at: datetime
 
 
+# --- Document management (versioned, release-scoped) -----------------------
+# Supported document types are admin-managed (see config endpoints / the
+# `document_type` table), not a fixed code-level set. An operator marks each
+# document with one of the configured type names; uploads are validated against
+# the configured set.
+class DocumentTypeCreate(BaseModel):
+    name: str
+
+
+class DocumentType(BaseModel):
+    id: int
+    name: str
+    created_at: datetime
+
+
+class DocumentVersionMeta(BaseModel):
+    """One uploaded version of a document (content streamed separately)."""
+    id: int
+    document_id: int
+    version: int
+    filename: str
+    content_type: str
+    size: int
+    uploaded_by: str | None = None
+    created_at: datetime
+
+
+class DocumentMeta(BaseModel):
+    """A logical document plus the metadata of its latest version."""
+    id: int
+    release_id: int
+    title: str
+    doc_type: str
+    created_at: datetime
+    version_count: int = 0
+    latest_version_id: int | None = None
+    latest_version: int | None = None
+    latest_filename: str | None = None
+    latest_content_type: str | None = None
+    latest_size: int | None = None
+    latest_uploaded_by: str | None = None
+    updated_at: datetime | None = None
+
+
 # --- Issue-tracker sync ----------------------------------------------------
 class JiraSyncRequest(BaseModel):
     """Filter for an issue sync. The meaningful fields depend on the active
@@ -294,6 +338,9 @@ class ReleaseStatusSummary(BaseModel):
     open_bugs: list[JiraIssue] = []
     required_docs: list[RequiredDoc] = []
     missing_docs: list[str] = []
+    # Document types currently uploaded on the release — feeds `document:<type>`
+    # workflow readiness guards.
+    present_doc_types: list[str] = []
     pending_checks: int = 0
     total_checks: int = 0
     is_ready: bool = False

@@ -66,6 +66,25 @@ export interface JiraIssue {
   id: number; release_id: number; issue_key: string;
   issue_type: string; summary: string; status: string; synced_at: string;
 }
+// Supported document types are admin-managed (configured on the Configuration
+// page); fetch the live set via listDocumentTypes rather than hardcoding them.
+export interface DocumentType { id: number; name: string; created_at: string }
+
+export interface DocumentMeta {
+  id: number; release_id: number; title: string; doc_type: string; created_at: string;
+  version_count: number;
+  latest_version_id: number | null;
+  latest_version: number | null;
+  latest_filename: string | null;
+  latest_content_type: string | null;
+  latest_size: number | null;
+  latest_uploaded_by: string | null;
+  updated_at: string | null;
+}
+export interface DocumentVersionMeta {
+  id: number; document_id: number; version: number; filename: string;
+  content_type: string; size: number; uploaded_by: string | null; created_at: string;
+}
 
 // --- Workflow (state graph + per-transition RBAC) --------------------------
 export interface WorkflowTransition { name: string; target: string; roles: string[]; requires: string[] }
@@ -89,6 +108,7 @@ export interface ReleaseStatusSummary {
   open_bugs: JiraIssue[];
   required_docs: RequiredDoc[];
   missing_docs: string[];
+  present_doc_types: string[];
   pending_checks: number;
   total_checks: number;
   is_ready: boolean;
@@ -215,6 +235,14 @@ export const addCheckTemplate = (label: string, phase: Phase) =>
 export const deleteCheckTemplate = (id: number) =>
   api.delete(`/api/v1/config/check-templates/${id}`).then((r) => r.data);
 
+// Supported document types (admin-managed on the Configuration page).
+export const listDocumentTypes = () =>
+  api.get<DocumentType[]>("/api/v1/config/document-types").then((r) => r.data);
+export const addDocumentType = (name: string) =>
+  api.post<DocumentType>("/api/v1/config/document-types", { name }).then((r) => r.data);
+export const deleteDocumentType = (id: number) =>
+  api.delete(`/api/v1/config/document-types/${id}`).then((r) => r.data);
+
 // --- Documentation ---------------------------------------------------------
 export const listDocumentation = (releaseId: number) =>
   api.get<DocumentationMeta[]>(`/api/v1/release/${releaseId}/documentation`).then((r) => r.data);
@@ -230,6 +258,67 @@ export const generateReleaseNotes = (releaseId: number) =>
   api
     .post<DocumentationMeta>(`/api/v1/release/${releaseId}/release-notes/generate`)
     .then((r) => r.data);
+
+// --- Document management (versioned) ---------------------------------------
+const DOCS = (releaseId: number) => `/api/v1/release/${releaseId}/documents`;
+
+export const listDocuments = (releaseId: number) =>
+  api.get<DocumentMeta[]>(DOCS(releaseId)).then((r) => r.data);
+
+// Create a new document from an uploaded file (becomes version 1). The operator
+// marks it with a supported type (fixed for all later versions); the title
+// defaults to the file name server-side when omitted.
+export const uploadDocument = (
+  releaseId: number,
+  file: File,
+  docType: string,
+  title?: string
+) => {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("doc_type", docType);
+  if (title) form.append("title", title);
+  return api.post<DocumentMeta>(DOCS(releaseId), form).then((r) => r.data);
+};
+
+export const listDocumentVersions = (releaseId: number, documentId: number) =>
+  api
+    .get<DocumentVersionMeta[]>(`${DOCS(releaseId)}/${documentId}/versions`)
+    .then((r) => r.data);
+
+// Upload a new version of an existing document.
+export const uploadDocumentVersion = (releaseId: number, documentId: number, file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api
+    .post<DocumentMeta>(`${DOCS(releaseId)}/${documentId}/versions`, form)
+    .then((r) => r.data);
+};
+
+export const deleteDocument = (releaseId: number, documentId: number) =>
+  api.delete(`${DOCS(releaseId)}/${documentId}`).then((r) => r.data);
+
+// Download a specific version. The endpoint is Bearer-protected, so we fetch it
+// as a blob via axios (which attaches the token) and trigger a save in-browser.
+export async function downloadDocumentVersion(
+  releaseId: number,
+  documentId: number,
+  versionId: number,
+  filename: string
+) {
+  const { data } = await api.get(
+    `${DOCS(releaseId)}/${documentId}/versions/${versionId}/content`,
+    { responseType: "blob" }
+  );
+  const url = URL.createObjectURL(data as Blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
 
 // --- Jira integration ------------------------------------------------------
 export const listJiraIssues = (releaseId: number) =>

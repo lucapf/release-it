@@ -10,6 +10,7 @@ from __future__ import annotations
 import psycopg
 
 from app.core.jwt_verify import ALL_ROLES
+from app.repositories import config as config_repo
 from app.repositories import workflow as repo
 from app.services import appconfig
 from app.services.state_machine import (
@@ -17,7 +18,9 @@ from app.services.state_machine import (
     StateError,
     StateMachine,
     build_state_machine,
+    document_guard_type,
     dump_yaml,
+    is_document_guard,
 )
 
 
@@ -35,7 +38,7 @@ def replace(conn: psycopg.Connection, states: list[dict]) -> StateMachine:
     """Validate and persist a complete new workflow graph, returning the rebuilt
     StateMachine. ``states`` is the ordered list of
     ``{name, transitions: [{name, target, roles, requires}]}``."""
-    _validate(states)
+    _validate(states, config_repo.document_type_names(conn))
     repo.replace(conn, states)
     # The structural roles saved here are now authoritative, so drop any stale
     # per-transition role overrides (legacy app_config layer) that would shadow
@@ -44,7 +47,7 @@ def replace(conn: psycopg.Connection, states: list[dict]) -> StateMachine:
     return from_db(conn)
 
 
-def _validate(states: list[dict]) -> None:
+def _validate(states: list[dict], doc_types: set[str]) -> None:
     if not states:
         raise StateError("Workflow must define at least one state.")
 
@@ -76,9 +79,16 @@ def _validate(states: list[dict]) -> None:
             if bad_roles:
                 raise StateError(f"Unknown role(s): {', '.join(sorted(bad_roles))}.")
 
-            bad_guards = set(t.get("requires") or []) - KNOWN_GUARDS
-            if bad_guards:
-                raise StateError(
-                    f"Unknown readiness guard(s): {', '.join(sorted(bad_guards))}. "
-                    f"Allowed: {', '.join(sorted(KNOWN_GUARDS))}."
-                )
+            for guard in t.get("requires") or []:
+                if is_document_guard(guard):
+                    doc_type = document_guard_type(guard)
+                    if doc_type not in doc_types:
+                        raise StateError(
+                            f'Unknown document type "{doc_type}" in guard "{guard}". '
+                            f"Configure it under Document types first."
+                        )
+                elif guard not in KNOWN_GUARDS:
+                    raise StateError(
+                        f'Unknown readiness guard "{guard}". Allowed: '
+                        f"{', '.join(sorted(KNOWN_GUARDS))}, or document:<TypeName>."
+                    )

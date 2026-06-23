@@ -15,9 +15,17 @@
 #   replicas: 2
 #   solutionEnabled: true
 
-# releaseit-auth:
-#   auth:
-#     bootstrapAdmin: { username: admin, password: change-me }
+# Default administrator credentials for the local stack. `allowInsecure: true`
+# turns off the weak-password guard so the trivial admin/admin default below can
+# be seeded — this is for local/dev only. For any real deployment set a strong
+# password and drop allowInsecure, ideally via a secret:
+#   --set releaseit-auth.auth.bootstrapAdmin.password=...
+releaseit-auth:
+  auth:
+    bootstrapAdmin:
+      username: admin
+      password: admin
+      allowInsecure: true
 
 # releaseit-frontend:
 #   ingress:

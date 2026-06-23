@@ -33,7 +33,7 @@ def _bootstrap_admin() -> None:
     with connection() as conn:
         if users_repo.count_users(conn) == 0:
             password = settings.bootstrap_admin_password
-            if (
+            if not settings.allow_insecure_bootstrap and (
                 password.lower() in _INSECURE_BOOTSTRAP_PASSWORDS
                 or len(password) < _MIN_BOOTSTRAP_PASSWORD_LEN
             ):

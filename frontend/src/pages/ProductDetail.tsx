@@ -9,6 +9,8 @@ import {
   Button,
   Card,
   Checkbox,
+  Collapse,
+  FileButton,
   Group,
   Loader,
   SegmentedControl,
@@ -22,17 +24,23 @@ import {
   TextInput,
   Textarea,
   Title,
+  Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
   IconChecklist,
+  IconChevronDown,
+  IconChevronRight,
   IconClipboardText,
+  IconDownload,
   IconFile,
+  IconFiles,
   IconFileText,
   IconHistory,
   IconListDetails,
   IconRocket,
   IconTrash,
+  IconUpload,
   IconBrandGithub,
 } from "@tabler/icons-react";
 import {
@@ -43,6 +51,15 @@ import {
   listDocumentation,
   addDocumentation,
   generateReleaseNotes,
+  listDocuments,
+  uploadDocument,
+  listDocumentVersions,
+  uploadDocumentVersion,
+  deleteDocument,
+  downloadDocumentVersion,
+  listDocumentTypes,
+  DocumentMeta,
+  DocumentVersionMeta,
   listJiraIssues,
   syncJira,
   getSyncFilter,
@@ -225,6 +242,294 @@ function DocumentationTab({ releaseId }: { releaseId: number }) {
         </Card>
       )}
     </SimpleGrid>
+  );
+}
+
+// --- Documents tab (uploaded files with version history) -------------------
+function formatBytes(n: number | null | undefined): string {
+  if (!n) return "—";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function VersionHistory({ releaseId, documentId }: { releaseId: number; documentId: number }) {
+  const { data: versions = [], isLoading } = useQuery({
+    queryKey: ["doc-versions", documentId],
+    queryFn: () => listDocumentVersions(releaseId, documentId),
+  });
+  const dl = useMutation({
+    mutationFn: (v: DocumentVersionMeta) =>
+      downloadDocumentVersion(releaseId, documentId, v.id, v.filename),
+    onError: (e: any) => notifyApiError(e, "Download failed"),
+  });
+
+  if (isLoading) return <Group justify="center" py="sm"><Loader size="sm" /></Group>;
+
+  return (
+    <Table.ScrollContainer minWidth={420}>
+      <Table verticalSpacing="xs" fz="sm">
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th>Version</Table.Th>
+            <Table.Th>File</Table.Th>
+            <Table.Th>Size</Table.Th>
+            <Table.Th>Uploaded</Table.Th>
+            <Table.Th>By</Table.Th>
+            <Table.Th />
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {versions.map((v, idx) => (
+            <Table.Tr key={v.id}>
+              <Table.Td>
+                <Group gap={6} wrap="nowrap">
+                  <Badge size="sm" variant="light">v{v.version}</Badge>
+                  {idx === 0 && <Badge size="sm" color="teal" variant="light">current</Badge>}
+                </Group>
+              </Table.Td>
+              <Table.Td>{v.filename}</Table.Td>
+              <Table.Td>{formatBytes(v.size)}</Table.Td>
+              <Table.Td>{new Date(v.created_at).toLocaleString()}</Table.Td>
+              <Table.Td>{v.uploaded_by || "—"}</Table.Td>
+              <Table.Td>
+                <Tooltip label="Download this version">
+                  <ActionIcon
+                    variant="subtle"
+                    aria-label={`Download version ${v.version}`}
+                    loading={dl.isPending && dl.variables?.id === v.id}
+                    onClick={() => dl.mutate(v)}
+                  >
+                    <IconDownload size={16} />
+                  </ActionIcon>
+                </Tooltip>
+              </Table.Td>
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </Table.ScrollContainer>
+  );
+}
+
+function DocumentsTab({ releaseId }: { releaseId: number }) {
+  const qc = useQueryClient();
+  const { hasRole } = useAuth();
+  const canEdit = hasRole("Developer", "Release Manager", "Administrator");
+  const canDelete = hasRole("Release Manager", "Administrator");
+  const key = ["documents", releaseId];
+  const { data: docs = [], isLoading } = useQuery({
+    queryKey: key,
+    queryFn: () => listDocuments(releaseId),
+  });
+  // Supported types are admin-managed on the Configuration page.
+  const { data: docTypes = [] } = useQuery({
+    queryKey: ["document-types"],
+    queryFn: listDocumentTypes,
+  });
+  const [title, setTitle] = useState("");
+  const [docType, setDocType] = useState<string | null>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [expanded, setExpanded] = useState<number | null>(null);
+
+  const invalidate = (docId?: number) => {
+    qc.invalidateQueries({ queryKey: key });
+    if (docId) qc.invalidateQueries({ queryKey: ["doc-versions", docId] });
+  };
+
+  const upload = useMutation({
+    mutationFn: () =>
+      uploadDocument(releaseId, file as File, docType as string, title.trim() || undefined),
+    onSuccess: () => {
+      setFile(null);
+      setTitle("");
+      setDocType(null);
+      invalidate();
+      notifications.show({ message: "Document uploaded", color: "teal" });
+    },
+    onError: (e: any) => notifyApiError(e, "Upload failed"),
+  });
+
+  const newVersion = useMutation({
+    mutationFn: ({ docId, f }: { docId: number; f: File }) =>
+      uploadDocumentVersion(releaseId, docId, f),
+    onSuccess: (_d, vars) => {
+      invalidate(vars.docId);
+      notifications.show({ message: "New version uploaded", color: "teal" });
+    },
+    onError: (e: any) => notifyApiError(e, "Upload failed"),
+  });
+
+  const remove = useMutation({
+    mutationFn: (docId: number) => deleteDocument(releaseId, docId),
+    onSuccess: () => {
+      invalidate();
+      notifications.show({ message: "Document deleted", color: "teal" });
+    },
+    onError: (e: any) => notifyApiError(e, "Delete failed"),
+  });
+
+  const downloadLatest = (d: DocumentMeta) => {
+    if (d.latest_version_id == null) return;
+    downloadDocumentVersion(releaseId, d.id, d.latest_version_id, d.latest_filename || d.title).catch(
+      (e) => notifyApiError(e, "Download failed")
+    );
+  };
+
+  if (isLoading) return <Group justify="center" py="xl"><Loader /></Group>;
+
+  return (
+    <Stack gap="md">
+      {canEdit && (
+        <Card withBorder padding="md">
+          <Title order={5} mb="sm">Upload a document</Title>
+          <Group align="flex-end" gap="sm">
+            <TextInput
+              label="Title (optional)"
+              placeholder="Defaults to the file name"
+              value={title}
+              onChange={(e) => setTitle(e.currentTarget.value)}
+              style={{ flex: 1 }}
+            />
+            <Select
+              label="Type"
+              placeholder={docTypes.length ? "Select a type" : "No types configured"}
+              required
+              disabled={docTypes.length === 0}
+              data={docTypes.map((t) => t.name)}
+              value={docType}
+              onChange={setDocType}
+              allowDeselect={false}
+              style={{ width: 170 }}
+            />
+            <FileButton onChange={setFile}>
+              {(props) => (
+                <Button {...props} variant="light" leftSection={<IconFile size={16} />}>
+                  {file ? "Change file" : "Choose file"}
+                </Button>
+              )}
+            </FileButton>
+            <Button
+              leftSection={<IconUpload size={16} />}
+              disabled={!file || !docType}
+              loading={upload.isPending}
+              onClick={() => upload.mutate()}
+            >
+              Upload
+            </Button>
+          </Group>
+          {file && (
+            <Text size="sm" c="dimmed" mt="xs">
+              Selected: {file.name} ({formatBytes(file.size)})
+            </Text>
+          )}
+          {docTypes.length === 0 && (
+            <Text size="sm" c="dimmed" mt="xs">
+              No document types are configured yet — add them on the Configuration page.
+            </Text>
+          )}
+        </Card>
+      )}
+
+      {docs.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={IconFiles}
+            title="No documents yet"
+            description={
+              canEdit
+                ? "Upload a file above. Re-uploading to a document keeps every previous version."
+                : "Documents uploaded to this release will appear here."
+            }
+          />
+        </Card>
+      ) : (
+        <Stack gap="sm">
+          {docs.map((d) => {
+            const open = expanded === d.id;
+            return (
+              <Card key={d.id} withBorder padding="md">
+                <Group justify="space-between" wrap="nowrap">
+                  <Group gap={8} wrap="nowrap" style={{ minWidth: 0 }}>
+                    <IconFileText size={18} stroke={1.6} color="var(--mantine-color-dimmed)" />
+                    <div style={{ minWidth: 0 }}>
+                      <Group gap={6} wrap="nowrap">
+                        <Text fw={600} truncate>{d.title}</Text>
+                        <Badge size="sm" variant="light" color="grape">{d.doc_type}</Badge>
+                      </Group>
+                      <Text size="xs" c="dimmed">
+                        {d.latest_filename} · {formatBytes(d.latest_size)} ·{" "}
+                        {d.updated_at ? new Date(d.updated_at).toLocaleString() : "—"}
+                      </Text>
+                    </div>
+                  </Group>
+                  <Group gap={6} wrap="nowrap">
+                    <Badge variant="light">v{d.latest_version ?? 1}</Badge>
+                    <Tooltip label="Download latest version">
+                      <ActionIcon
+                        variant="subtle"
+                        aria-label="Download latest"
+                        onClick={() => downloadLatest(d)}
+                      >
+                        <IconDownload size={18} />
+                      </ActionIcon>
+                    </Tooltip>
+                    {canEdit && (
+                      <FileButton onChange={(f) => f && newVersion.mutate({ docId: d.id, f })}>
+                        {(props) => (
+                          <Tooltip label="Upload new version">
+                            <ActionIcon
+                              {...props}
+                              variant="subtle"
+                              aria-label="Upload new version"
+                              loading={newVersion.isPending && newVersion.variables?.docId === d.id}
+                            >
+                              <IconUpload size={18} />
+                            </ActionIcon>
+                          </Tooltip>
+                        )}
+                      </FileButton>
+                    )}
+                    <Tooltip label={open ? "Hide versions" : `Show ${d.version_count} version(s)`}>
+                      <ActionIcon
+                        variant="subtle"
+                        aria-label="Toggle version history"
+                        onClick={() => setExpanded(open ? null : d.id)}
+                      >
+                        {open ? <IconChevronDown size={18} /> : <IconChevronRight size={18} />}
+                      </ActionIcon>
+                    </Tooltip>
+                    {canDelete && (
+                      <Tooltip label="Delete document">
+                        <ActionIcon
+                          variant="subtle"
+                          color="red"
+                          aria-label="Delete document"
+                          loading={remove.isPending && remove.variables === d.id}
+                          onClick={() => remove.mutate(d.id)}
+                        >
+                          <IconTrash size={18} />
+                        </ActionIcon>
+                      </Tooltip>
+                    )}
+                  </Group>
+                </Group>
+                <Collapse in={open}>
+                  <Stack gap={0} mt="sm">
+                    {open && <VersionHistory releaseId={releaseId} documentId={d.id} />}
+                  </Stack>
+                </Collapse>
+              </Card>
+            );
+          })}
+        </Stack>
+      )}
+    </Stack>
   );
 }
 
@@ -703,6 +1008,7 @@ export function ProductDetailPage() {
           <Tabs.Tab value="overview" leftSection={<IconClipboardText size={16} />}>Overview</Tabs.Tab>
           <Tabs.Tab value="checks" leftSection={<IconChecklist size={16} />}>Checks</Tabs.Tab>
           <Tabs.Tab value="documentation" leftSection={<IconFile size={16} />}>Documentation</Tabs.Tab>
+          <Tabs.Tab value="documents" leftSection={<IconFiles size={16} />}>Documents</Tabs.Tab>
           <Tabs.Tab value="issues" leftSection={<IconListDetails size={16} />}>Issues</Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<IconHistory size={16} />}>History</Tabs.Tab>
         </Tabs.List>
@@ -719,6 +1025,10 @@ export function ProductDetailPage() {
 
         <Tabs.Panel value="documentation" pt="md">
           {activeId ? <DocumentationTab releaseId={activeId} /> : needsRelease("attach documentation")}
+        </Tabs.Panel>
+
+        <Tabs.Panel value="documents" pt="md">
+          {activeId ? <DocumentsTab releaseId={activeId} /> : needsRelease("manage documents")}
         </Tabs.Panel>
 
         <Tabs.Panel value="issues" pt="md">

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import config, environment, product, release, solution, workflow
+from app.api.v1 import config, document, environment, product, release, solution, workflow
 from app.core.config import settings
 from app.db.migrate import apply_pending
 from app.db.pool import close_pool, connection, open_pool
@@ -44,6 +44,7 @@ app.add_middleware(
 
 app.include_router(product.router, prefix="/api/v1/product", tags=["product"])
 app.include_router(release.router, prefix="/api/v1/release", tags=["release"])
+app.include_router(document.router, prefix="/api/v1/release", tags=["document"])
 app.include_router(environment.router, prefix="/api/v1/environment", tags=["environment"])
 app.include_router(workflow.router, prefix="/api/v1/workflow", tags=["workflow"])
 app.include_router(config.router, prefix="/api/v1/config", tags=["config"])
