@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import psycopg
 
-_COLS = "id, release_id, issue_key, issue_type, summary, status, synced_at"
+_COLS = "id, release_id, issue_key, issue_type, summary, status, url, synced_at"
 
 
 def replace_for_release(
@@ -23,12 +23,13 @@ def replace_for_release(
     for issue in issues:
         conn.execute(
             """
-            INSERT INTO jira_issue (release_id, issue_key, issue_type, summary, status)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO jira_issue (release_id, issue_key, issue_type, summary, status, url)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (release_id, issue_key) DO UPDATE
                 SET issue_type = EXCLUDED.issue_type,
                     summary    = EXCLUDED.summary,
                     status     = EXCLUDED.status,
+                    url        = EXCLUDED.url,
                     synced_at  = now()
             """,
             (
@@ -37,6 +38,7 @@ def replace_for_release(
                 issue.get("type", "Task"),
                 issue.get("summary", ""),
                 issue.get("status", ""),
+                issue.get("url", ""),
             ),
         )
     return list_by_release(conn, release_id)

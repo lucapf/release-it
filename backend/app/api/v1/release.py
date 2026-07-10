@@ -1,25 +1,16 @@
-"""/api/v1/release — release lifecycle: CRUD, checks, artifacts, docs,
+"""/api/v1/release — release lifecycle: CRUD, artifacts, docs,
 state transitions, inheritance, and install pipeline triggering."""
 from __future__ import annotations
 
+import httpx
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 
-from app.core.config import settings
-from app.core.jwt_verify import (
-    ROLE_ADMIN,
-    ROLE_DEVELOPER,
-    ROLE_RELEASE_MANAGER,
-    Principal,
-    current_principal,
-    require_role,
-)
+from app.core.identity import Principal, current_principal
 from app.db.pool import get_conn
-from app.integrations import llm, trackers
+from app.integrations import trackers
 from app.integrations.pipeline import get_runner
-from app.repositories import config as config_repo
-from app.repositories import documents as documents_repo
 from app.repositories import jira_issues as jira_repo
 from app.repositories import products as products_repo
 from app.repositories import releases as repo
@@ -28,53 +19,28 @@ from app.services import appconfig
 from app.schemas.models import (
     ArtifactMeta,
     AuditEntry,
-    Check,
-    CheckCreate,
-    CheckUpdate,
-    DocumentationMeta,
     InheritRequest,
+    IssueDetail,
     JiraIssue,
     JiraSyncRequest,
     Release,
+    ReleaseBugCount,
     SyncFilter,
     SyncFilterView,
     ReleaseCreate,
     ReleaseStatusSummary,
-    RequiredDoc,
     TransitionRequest,
 )
 from app.services import audit
-from app.services.state_machine import (
-    StateError,
-    StateMachine,
-    document_guard_type,
-    is_document_guard,
-)
+from app.services import release_ops
+from app.services.release_status import compute_status
+from app.services.state_machine import StateMachine
 
 router = APIRouter()
-
-# State name that triggers the production sync/install pipeline (docs: Approved).
-PIPELINE_TRIGGER_STATE = "Approved"
 
 
 def get_state_machine(request: Request) -> StateMachine:
     return request.app.state.state_machine
-
-
-def _split(csv: str) -> list[str]:
-    return [s.strip() for s in csv.split(",") if s.strip()]
-
-
-def _parse_required_docs(csv: str) -> list[tuple[str, str]]:
-    """Parse ``Label=keyword,...`` into (label, keyword) pairs."""
-    pairs: list[tuple[str, str]] = []
-    for item in _split(csv):
-        label, _, keyword = item.partition("=")
-        label = label.strip()
-        keyword = (keyword or label).strip().lower()
-        if label:
-            pairs.append((label, keyword))
-    return pairs
 
 
 def _load(conn: psycopg.Connection, release_id: int) -> dict:
@@ -84,93 +50,23 @@ def _load(conn: psycopg.Connection, release_id: int) -> dict:
     return row
 
 
-def _compute_status(conn: psycopg.Connection, rel: dict) -> ReleaseStatusSummary:
-    """Aggregate a release's readiness: open (not-closed) tracker issues, the
-    required-documentation checklist, and outstanding checks. Single source of
-    truth for both the status endpoint and the transition guards."""
-    release_id = rel["id"]
-    # Any synced issue whose status is not a closed one (default: only "Done")
-    # counts as open — regardless of issue type.
-    closed = {s.lower() for s in _split(settings.closed_bug_statuses)}
-    issues = jira_repo.list_by_release(conn, release_id)
-    open_bugs = [i for i in issues if i["status"].lower() not in closed]
-
-    published = [d["name"].lower() for d in repo.list_documentation(conn, release_id)
-                 if not d["is_draft"]]
-    required = [
-        RequiredDoc(label=label, present=any(keyword in name for name in published))
-        for label, keyword in _parse_required_docs(settings.required_docs)
-    ]
-    missing = [d.label for d in required if not d.present]
-
-    checks = repo.list_checks(conn, release_id)
-    pending = sum(1 for c in checks if not c["done"])
-
-    present_doc_types = documents_repo.present_types(conn, release_id)
-
-    return ReleaseStatusSummary(
-        release_id=release_id,
-        state=rel["state"],
-        open_bug_count=len(open_bugs),
-        open_bugs=open_bugs,
-        required_docs=required,
-        missing_docs=missing,
-        present_doc_types=sorted(present_doc_types),
-        pending_checks=pending,
-        total_checks=len(checks),
-        is_ready=not open_bugs and not missing and pending == 0,
-    )
-
-
-def _unmet_requirements(requires: frozenset[str], status: ReleaseStatusSummary) -> list[str]:
-    """Human-readable reasons a guarded transition is blocked (empty = allowed).
-    Guard names mirror those declared in states.yaml `requires`."""
-    reasons: list[str] = []
-    if "no_open_issues" in requires and status.open_bug_count > 0:
-        reasons.append(
-            f"{status.open_bug_count} open issue(s) must be closed first"
-        )
-    if "docs_complete" in requires and status.missing_docs:
-        reasons.append(
-            f"missing required documentation: {', '.join(status.missing_docs)}"
-        )
-    if "checks_done" in requires and status.pending_checks > 0:
-        reasons.append(
-            f"{status.pending_checks} checklist item(s) still pending"
-        )
-    present = set(status.present_doc_types)
-    for guard in requires:
-        if is_document_guard(guard):
-            doc_type = document_guard_type(guard)
-            if doc_type not in present:
-                reasons.append(f'missing required document: "{doc_type}"')
-    return reasons
-
-
 # --- Release CRUD ----------------------------------------------------------
-@router.post("", response_model=Release, status_code=201,
-             dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.post("", response_model=Release, status_code=201)
 def create_release(
     body: ReleaseCreate,
     conn: psycopg.Connection = Depends(get_conn),
     sm: StateMachine = Depends(get_state_machine),
     principal: Principal = Depends(current_principal),
 ):
-    if products_repo.get(conn, body.product_id) is None:
-        raise HTTPException(404, "Product not found")
-    row = repo.create(
-        conn,
-        product_id=body.product_id,
-        version=body.version,
-        state=sm.initial_state,
-        short_description=body.short_description,
-    )
-    # Seed the release with the organisation's default checklist.
-    for tpl in config_repo.list_check_templates(conn):
-        repo.add_check(conn, row["id"], tpl["label"], tpl["phase"])
-    audit.record(conn, entity_type="release", entity_id=row["id"],
-                 action="created", operator=principal.subject, new_value=row["state"])
-    return row
+    try:
+        return release_ops.create_release(
+            conn, sm, principal,
+            product_id=body.product_id,
+            version=body.version,
+            short_description=body.short_description,
+        )
+    except release_ops.ReleaseActionError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
 
 
 @router.get("/{release_id}", response_model=Release)
@@ -178,8 +74,7 @@ def get_release(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
     return _load(conn, release_id)
 
 
-@router.delete("/{release_id}", status_code=204,
-               dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.delete("/{release_id}", status_code=204)
 def delete_release(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
     """Permanently delete a release and all its assets (checks, artifacts,
     documents, synced issues). Cannot be undone."""
@@ -190,9 +85,9 @@ def delete_release(release_id: int, conn: psycopg.Connection = Depends(get_conn)
 # --- Status summary & history ----------------------------------------------
 @router.get("/{release_id}/status", response_model=ReleaseStatusSummary)
 def release_status(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
-    """Readiness overview for a release: open (not-closed) Jira issues, the
-    required-documentation checklist, and outstanding checks."""
-    return _compute_status(conn, _load(conn, release_id))
+    """Readiness overview for a release: open (not-closed) tracker issues and
+    the uploaded document types."""
+    return compute_status(conn, _load(conn, release_id))
 
 
 @router.get("/{release_id}/history", response_model=list[AuditEntry])
@@ -216,51 +111,16 @@ def transition_release(
     are legal from the current state; the effective roles (admin override >
     states.yaml > default) decide who may perform it — both enforced here, not
     just in the UI."""
-    rel = _load(conn, release_id)
-
-    trans = sm.transition(rel["state"], body.transition)
-    if trans is None:
-        # Not a legal transition out of the current state — reuse the state
-        # machine's descriptive error message.
-        try:
-            sm.apply(rel["state"], body.transition)
-        except StateError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    allowed_roles = appconfig.transition_roles(conn, sm, rel["state"], body.transition)
-    if not principal.has_any(allowed_roles):
-        raise HTTPException(
-            403,
-            f"Transition '{body.transition}' requires one of roles: "
-            f"{', '.join(sorted(allowed_roles))}",
+    try:
+        return release_ops.apply_transition(
+            conn, sm, principal, release_id, body.transition, body.note
         )
-
-    # Readiness guards declared in states.yaml (e.g. Approve needs all issues
-    # closed and the required docs present). Reject and Cancel stay unguarded.
-    unmet = _unmet_requirements(trans.requires, _compute_status(conn, rel))
-    if unmet:
-        raise HTTPException(
-            409,
-            f"Cannot '{body.transition}' release v{rel['version']}: " + "; ".join(unmet),
-        )
-
-    new_state = trans.target
-    updated = repo.set_state(conn, release_id, new_state)
-    audit.record(conn, entity_type="release", entity_id=release_id,
-                 action="status_update", operator=principal.subject,
-                 old_value=rel["state"], new_value=new_state)
-
-    # Version-2 feature: on Approved, run the production sync/install pipeline.
-    if new_state == PIPELINE_TRIGGER_STATE:
-        get_runner("gitlab-ci").trigger(
-            release_id, ref=updated["version"], variables={"version": updated["version"]}
-        )
-    return updated
+    except release_ops.ReleaseActionError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
 
 
 # --- Release inheritance ---------------------------------------------------
-@router.post("/{release_id}/inherit", response_model=Release, status_code=201,
-             dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.post("/{release_id}/inherit", response_model=Release, status_code=201)
 def inherit_release(
     release_id: int,
     body: InheritRequest,
@@ -285,39 +145,8 @@ def inherit_release(
     return child
 
 
-# --- Checks ----------------------------------------------------------------
-@router.get("/{release_id}/checks", response_model=list[Check])
-def list_checks(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
-    _load(conn, release_id)
-    return repo.list_checks(conn, release_id)
-
-
-@router.post("/{release_id}/checks", response_model=Check, status_code=201,
-             dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
-def add_check(release_id: int, body: CheckCreate, conn: psycopg.Connection = Depends(get_conn)):
-    _load(conn, release_id)
-    return repo.add_check(conn, release_id, body.label, body.phase)
-
-
-@router.patch("/checks/{check_id}", response_model=Check,
-              dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
-def update_check(check_id: int, body: CheckUpdate, conn: psycopg.Connection = Depends(get_conn)):
-    row = repo.set_check_done(conn, check_id, body.done)
-    if row is None:
-        raise HTTPException(404, "Check not found")
-    return row
-
-
-@router.delete("/checks/{check_id}", status_code=204,
-               dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
-def delete_check(check_id: int, conn: psycopg.Connection = Depends(get_conn)):
-    if not repo.delete_check(conn, check_id):
-        raise HTTPException(404, "Check not found")
-
-
 # --- Artifacts (bytea) -----------------------------------------------------
-@router.post("/{release_id}/artifacts", response_model=ArtifactMeta, status_code=201,
-             dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.post("/{release_id}/artifacts", response_model=ArtifactMeta, status_code=201)
 async def upload_artifact(
     release_id: int, file: UploadFile, conn: psycopg.Connection = Depends(get_conn)
 ):
@@ -347,47 +176,7 @@ def download_artifact(artifact_id: int, conn: psycopg.Connection = Depends(get_c
     )
 
 
-# --- Documentation / release notes -----------------------------------------
-@router.get("/{release_id}/documentation", response_model=list[DocumentationMeta])
-def list_documentation(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
-    _load(conn, release_id)
-    return repo.list_documentation(conn, release_id)
-
-
-@router.post("/{release_id}/documentation", response_model=DocumentationMeta, status_code=201,
-             dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
-async def upload_documentation(
-    release_id: int, file: UploadFile, conn: psycopg.Connection = Depends(get_conn)
-):
-    _load(conn, release_id)
-    content = await file.read()
-    return repo.add_documentation(
-        conn, release_id, file.filename or "release-notes.md",
-        file.content_type or "text/markdown", content, is_draft=False,
-    )
-
-
-@router.post("/{release_id}/release-notes/generate", response_model=DocumentationMeta, status_code=201,
-             dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
-def generate_release_notes(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
-    """Draft release notes from the tracked issues via the configured LLM
-    engine (Claude or Ollama; falls back to a deterministic stub)."""
-    rel = _load(conn, release_id)
-    cfg = appconfig.effective(conn)
-    query, filter_kind = _build_query(cfg, rel, None)
-    repo_slug = _product_repo(conn, rel)
-    issues = trackers.fetch_issues(cfg, query, repo=repo_slug, filter_kind=filter_kind)
-    try:
-        draft = llm.get_release_note_service(cfg.llm).draft_release_notes(rel["version"], issues)
-    except Exception as exc:  # surface engine/credential errors clearly
-        raise HTTPException(502, f"LLM generation failed: {exc}") from exc
-    return repo.add_documentation(
-        conn, release_id, "release-notes-draft.md", "text/markdown",
-        draft.encode("utf-8"), is_draft=True,
-    )
-
-
-# --- Issue-tracker integration (Jira / GitHub, stub by default) ------------
+# --- Issue-tracker integration (Jira / GitHub) -----------------------------
 def _build_query(
     cfg: appconfig.EffectiveConfig, release: dict, body: JiraSyncRequest | None
 ) -> tuple[str, str]:
@@ -431,9 +220,9 @@ def sync_jira(
     """Fetch the issues contained in this release from the active tracker
     (Jira or GitHub, per configuration) and cache them.
 
-    Trackers are stubbed unless enabled, so this is safe to run locally
-    end-to-end. The stub is refresh-aware: the first sync returns a mix of
-    open/closed issues, and re-syncing reports them all as Done.
+    The tracker calls its real backing service (for tests, the Jira tracker is
+    pointed at the external jira-stub); when it is not configured there are no
+    issues to sync.
     """
     rel = _load(conn, release_id)
     cfg = appconfig.effective(conn)
@@ -445,11 +234,8 @@ def sync_jira(
             "No GitHub repository configured for this product. Set it on the "
             "product's Issues tab (e.g. 'owner/repo').",
         )
-    previous = jira_repo.list_by_release(conn, release_id)
     try:
-        issues = trackers.fetch_issues(
-            cfg, query, repo=repo_slug, filter_kind=filter_kind, previous=previous
-        )
+        issues = trackers.fetch_issues(cfg, query, repo=repo_slug, filter_kind=filter_kind)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     saved = jira_repo.replace_for_release(conn, release_id, issues)
@@ -462,6 +248,61 @@ def sync_jira(
 def list_jira_issues(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
     _load(conn, release_id)
     return jira_repo.list_by_release(conn, release_id)
+
+
+@router.get("/{release_id}/jira/issue", response_model=IssueDetail)
+def get_jira_issue(
+    release_id: int,
+    key: str = Query(description="Issue key as cached, e.g. 'REL-1' or '#12'"),
+    conn: psycopg.Connection = Depends(get_conn),
+):
+    """One issue's full detail, fetched live from the active tracker.
+
+    The cached rows carry only what the issue list needs; the description,
+    people and timestamps are read on demand so the operator always sees the
+    tracker's current state rather than whatever the last sync captured. The
+    key is passed as a query parameter because GitHub's ('#12') would otherwise
+    have to survive the URL path.
+    """
+    rel = _load(conn, release_id)
+    cfg = appconfig.effective(conn)
+    try:
+        issue = trackers.fetch_issue(cfg, key, repo=_product_repo(conn, rel))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Tracker query failed: {exc}") from exc
+    if issue is None:
+        raise HTTPException(404, f"Issue {key} not found in the active tracker")
+    return issue
+
+
+@router.get("/{release_id}/bugs/count", response_model=ReleaseBugCount)
+def release_bug_count(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
+    """Total bugs in this release, counted live from the active tracker. The
+    filter is always the release label ``v<major>.<minor>.<patch>`` (e.g.
+    ``v0.0.1``) derived from the release version."""
+    rel = _load(conn, release_id)
+    cfg = appconfig.effective(conn)
+    label = trackers.release_label(rel["version"])
+    repo_slug = _product_repo(conn, rel)
+    if cfg.provider == "github" and cfg.github.enabled and not repo_slug:
+        raise HTTPException(
+            400,
+            "No GitHub repository configured for this product. Set it on the "
+            "product's Issues tab (e.g. 'owner/repo').",
+        )
+    query = label if cfg.provider == "github" else f'labels = "{label}"'
+    filter_kind = "label" if cfg.provider == "github" else "jql"
+    try:
+        issues = trackers.fetch_issues(cfg, query, repo=repo_slug, filter_kind=filter_kind)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Tracker query failed: {exc}") from exc
+    return ReleaseBugCount(
+        release_id=release_id, label=label, total_bugs=trackers.count_bugs(issues)
+    )
 
 
 # --- Saved sync filter (any authenticated operator) ------------------------
@@ -499,10 +340,12 @@ def save_sync_filter(
 
 
 # --- Install pipeline (manual trigger) -------------------------------------
-@router.post("/{release_id}/install",
-             dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.post("/{release_id}/install")
 def install_release(release_id: int, conn: psycopg.Connection = Depends(get_conn)):
     rel = _load(conn, release_id)
-    return get_runner("gitlab-ci").trigger(
-        release_id, ref=rel["version"], variables={"version": rel["version"]}
-    )
+    try:
+        return get_runner("gitlab-ci").trigger(
+            release_id, ref=rel["version"], variables={"version": rel["version"]}
+        )
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc

@@ -1,5 +1,5 @@
-"""/api/v1/config — runtime configuration (issue tracker + credentials) and
-the global default-check templates. Read is open; writes are admin-only.
+"""/api/v1/config — runtime configuration (issue tracker + credentials).
+Read is open; writes are admin-only.
 
 Secrets are write-only: tokens are accepted on update but never returned. The
 response exposes only whether a token is currently stored (``token_set``).
@@ -9,11 +9,11 @@ from __future__ import annotations
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app.core.jwt_verify import ALL_ROLES, ROLE_ADMIN, ROLE_RELEASE_MANAGER, require_role
+from app.core.identity import ALL_ROLES
 from app.db.pool import get_conn
 from app.schemas.models import (
-    CheckTemplate,
-    CheckTemplateCreate,
+    AssistantPrompt,
+    AssistantPromptsUpdate,
     ClaudeConfigView,
     ConfigUpdate,
     ConfigView,
@@ -26,7 +26,7 @@ from app.schemas.models import (
     TransitionRolesUpdate,
 )
 from app.repositories import config as repo
-from app.services import appconfig
+from app.services import appconfig, assistant
 from app.services.state_machine import StateMachine
 
 router = APIRouter()
@@ -42,6 +42,7 @@ def get_config(conn: psycopg.Connection = Depends(get_conn)):
     cfg = appconfig.effective(conn)
     return ConfigView(
         tracker_provider=cfg.provider,
+        sync_interval_minutes=cfg.sync_interval_minutes,
         jira=JiraConfigView(
             enabled=cfg.jira.enabled,
             base_url=cfg.jira.base_url,
@@ -66,12 +67,13 @@ def get_config(conn: psycopg.Connection = Depends(get_conn)):
     )
 
 
-@router.put("", response_model=ConfigView,
-            dependencies=[Depends(require_role(ROLE_ADMIN))])
+@router.put("", response_model=ConfigView)
 def update_config(body: ConfigUpdate, conn: psycopg.Connection = Depends(get_conn)):
     # Non-exclusive fields: token fields are only persisted when a non-empty
     # value is supplied, so an omitted/blank token keeps the existing secret.
     values: dict[str, str] = {}
+    if body.sync_interval_minutes is not None:
+        values[appconfig.SYNC_INTERVAL_MINUTES] = str(body.sync_interval_minutes)
     if body.jira_base_url is not None:
         values[appconfig.JIRA_BASE_URL] = body.jira_base_url
     if body.jira_token:
@@ -128,8 +130,7 @@ def update_config(body: ConfigUpdate, conn: psycopg.Connection = Depends(get_con
 
 
 # --- Workflow transition roles (admin-defined) -----------------------------
-@router.put("/transition-roles", status_code=204,
-            dependencies=[Depends(require_role(ROLE_ADMIN))])
+@router.put("/transition-roles", status_code=204)
 def set_transition_roles(
     body: TransitionRolesUpdate,
     conn: psycopg.Connection = Depends(get_conn),
@@ -152,33 +153,13 @@ def set_transition_roles(
     appconfig.set_transition_role_overrides(conn, overrides)
 
 
-# --- Default check templates -----------------------------------------------
-@router.get("/check-templates", response_model=list[CheckTemplate])
-def list_check_templates(conn: psycopg.Connection = Depends(get_conn)):
-    return repo.list_check_templates(conn)
-
-
-@router.post("/check-templates", response_model=CheckTemplate, status_code=201,
-             dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
-def add_check_template(body: CheckTemplateCreate, conn: psycopg.Connection = Depends(get_conn)):
-    return repo.add_check_template(conn, body.label, body.phase)
-
-
-@router.delete("/check-templates/{template_id}", status_code=204,
-               dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
-def delete_check_template(template_id: int, conn: psycopg.Connection = Depends(get_conn)):
-    if not repo.delete_check_template(conn, template_id):
-        raise HTTPException(404, "Check template not found")
-
-
 # --- Supported document types ----------------------------------------------
 @router.get("/document-types", response_model=list[DocumentType])
 def list_document_types(conn: psycopg.Connection = Depends(get_conn)):
     return repo.list_document_types(conn)
 
 
-@router.post("/document-types", response_model=DocumentType, status_code=201,
-             dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.post("/document-types", response_model=DocumentType, status_code=201)
 def add_document_type(body: DocumentTypeCreate, conn: psycopg.Connection = Depends(get_conn)):
     name = body.name.strip()
     if not name:
@@ -188,8 +169,34 @@ def add_document_type(body: DocumentTypeCreate, conn: psycopg.Connection = Depen
     return repo.add_document_type(conn, name)
 
 
-@router.delete("/document-types/{type_id}", status_code=204,
-               dependencies=[Depends(require_role(ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.delete("/document-types/{type_id}", status_code=204)
 def delete_document_type(type_id: int, conn: psycopg.Connection = Depends(get_conn)):
     if not repo.delete_document_type(conn, type_id):
         raise HTTPException(404, "Document type not found")
+
+
+# --- Assistant prompts (admin-editable ready-to-use templates) -------------
+@router.get("/prompts", response_model=list[AssistantPrompt])
+def get_prompts(conn: psycopg.Connection = Depends(get_conn)):
+    """The prompt templates with any admin edits applied."""
+    return assistant.effective_prompts(appconfig.prompt_overrides(conn))
+
+
+@router.put("/prompts", response_model=list[AssistantPrompt])
+def update_prompts(body: AssistantPromptsUpdate, conn: psycopg.Connection = Depends(get_conn)):
+    """Replace the assistant prompt overrides. The body carries the full desired
+    state; each prompt is reduced to just the fields that differ from the
+    built-in default, so unchanged prompts keep tracking the defaults and
+    omitting a prompt (or matching the default) resets it."""
+    known = {t["key"] for t in assistant.PROMPT_TEMPLATES}
+    overrides: dict[str, dict] = {}
+    for p in body.prompts:
+        if p.key not in known:
+            raise HTTPException(400, f"Unknown prompt '{p.key}'")
+        entry = assistant.prompt_override_for(
+            p.key, {"title": p.title, "description": p.description, "prompt": p.prompt}
+        )
+        if entry:
+            overrides[p.key] = entry
+    appconfig.set_prompt_overrides(conn, overrides)
+    return assistant.effective_prompts(appconfig.prompt_overrides(conn))

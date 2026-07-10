@@ -1,0 +1,43 @@
+# Standard ReleaseIT authorization policy (consumed by POST /auth).
+#
+# Rules are evaluated top-to-bottom, FIRST MATCH WINS: the first rule whose
+# `path` + `methods` match the request decides the outcome — allowed if the
+# caller holds one of the rule's `roles`, denied otherwise. If no rule matches,
+# the request is denied (default deny).
+#
+# Path patterns:  '*' matches a single path segment, '**' matches any suffix.
+# methods/roles:  a list, or "*" to mean "any".
+#
+# In the cluster this file is provided by the releaseit-auth-authz configMap;
+# edit it there (auth.authzPolicy in the chart values) to change access rules.
+rules:
+  # --- User management — Administrators only (before the generic GET rule) ---
+  - { path: "/api/v1/user-management/users",    methods: "*", roles: ["Administrator"] }
+  - { path: "/api/v1/user-management/users/**", methods: "*", roles: ["Administrator"] }
+  - { path: "/api/v1/user-management/roles",    methods: "*", roles: ["Administrator"] }
+
+  # --- Products ------------------------------------------------------------
+  - { path: "/api/v1/product",   methods: ["POST"],   roles: ["Developer", "Release Manager", "Administrator"] }
+  - { path: "/api/v1/product/*", methods: ["PATCH"],  roles: ["Developer", "Release Manager", "Administrator"] }
+  - { path: "/api/v1/product/*", methods: ["DELETE"], roles: ["Administrator"] }
+
+  # --- Releases ------------------------------------------------------------
+  - { path: "/api/v1/release",                   methods: ["POST"],   roles: ["Developer", "Release Manager", "Administrator"] }
+  - { path: "/api/v1/release/*",                 methods: ["DELETE"], roles: ["Release Manager", "Administrator"] }
+  # Deleting a document (a release sub-resource, so /release/* above doesn't match
+  # its multi-segment path) is allowed for Release Managers and Administrators.
+  - { path: "/api/v1/release/*/documents/*",     methods: ["DELETE"], roles: ["Release Manager", "Administrator"] }
+  - { path: "/api/v1/release/**",                methods: ["POST", "PUT", "PATCH"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }
+
+  # --- Workflow & configuration (admin-managed) ----------------------------
+  - { path: "/api/v1/workflow",  methods: ["PUT"], roles: ["Administrator"] }
+  - { path: "/api/v1/config",    methods: ["PUT"], roles: ["Administrator"] }
+  - { path: "/api/v1/config/**", methods: ["POST", "PUT", "PATCH", "DELETE"], roles: ["Release Manager", "Administrator"] }
+
+  # --- LLM assistant (chat): any authenticated role. The assistant acts on the
+  #     caller's behalf, so the per-action RBAC (transition roles, etc.) is
+  #     re-enforced by the backend on each tool it calls. --------------------
+  - { path: "/api/v1/chat", methods: ["POST"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }
+
+  # --- Reads: any authenticated ReleaseIT role -----------------------------
+  - { path: "/api/v1/**", methods: ["GET"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }

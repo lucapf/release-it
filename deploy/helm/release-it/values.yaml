@@ -14,6 +14,8 @@
 # releaseit-backend:
 #   replicas: 2
 #   solutionEnabled: true
+#   # Maximum size of a single uploaded document, in MB (default 10).
+#   maxDocumentSizeMb: 25
 
 # Default administrator credentials for the local stack. `allowInsecure: true`
 # turns off the weak-password guard so the trivial admin/admin default below can
@@ -30,3 +32,32 @@ releaseit-auth:
 # releaseit-frontend:
 #   ingress:
 #     host: releaseit.local
+
+# Shared authorization policy (configMap releaseit-authz-policy), consumed by the
+# auth service's POST /auth endpoint to authorize requests to ALL services.
+# First match wins; default deny. '*' in a path matches one segment, '**' any
+# suffix; methods/roles may be a list or "*".
+authzPolicy: |
+  rules:
+    # User management — Administrators only (before the generic GET rule)
+    - { path: "/api/v1/user-management/users",    methods: "*", roles: ["Administrator"] }
+    - { path: "/api/v1/user-management/users/**", methods: "*", roles: ["Administrator"] }
+    - { path: "/api/v1/user-management/roles",    methods: "*", roles: ["Administrator"] }
+    # Products
+    - { path: "/api/v1/product",   methods: ["POST"],   roles: ["Developer", "Release Manager", "Administrator"] }
+    - { path: "/api/v1/product/*", methods: ["PATCH"],  roles: ["Developer", "Release Manager", "Administrator"] }
+    - { path: "/api/v1/product/*", methods: ["DELETE"], roles: ["Administrator"] }
+    # Releases
+    - { path: "/api/v1/release",                methods: ["POST"],   roles: ["Developer", "Release Manager", "Administrator"] }
+    - { path: "/api/v1/release/*",              methods: ["DELETE"], roles: ["Release Manager", "Administrator"] }
+    # Deleting a document (multi-segment path, so /release/* above doesn't match it)
+    - { path: "/api/v1/release/*/documents/*",  methods: ["DELETE"], roles: ["Release Manager", "Administrator"] }
+    - { path: "/api/v1/release/**",             methods: ["POST", "PUT", "PATCH"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }
+    # Workflow & configuration
+    - { path: "/api/v1/workflow",  methods: ["PUT"], roles: ["Administrator"] }
+    - { path: "/api/v1/config",    methods: ["PUT"], roles: ["Administrator"] }
+    - { path: "/api/v1/config/**", methods: ["POST", "PUT", "PATCH", "DELETE"], roles: ["Release Manager", "Administrator"] }
+    # LLM assistant (chat): any authenticated role; per-action RBAC is re-enforced by the backend
+    - { path: "/api/v1/chat", methods: ["POST"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }
+    # Reads: any authenticated ReleaseIT role
+    - { path: "/api/v1/**", methods: ["GET"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }

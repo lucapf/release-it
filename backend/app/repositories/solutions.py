@@ -39,23 +39,3 @@ def latest_release_states(conn: psycopg.Connection, solution_id: int) -> list[di
         """,
         (solution_id,),
     ).fetchall()
-
-
-def union_checks(conn: psycopg.Connection, solution_id: int) -> list[dict]:
-    """Union of pre/post checks across the latest release of each member product."""
-    return conn.execute(
-        """
-        WITH latest AS (
-            SELECT DISTINCT ON (p.id) r.id AS release_id
-            FROM product p
-            JOIN release r ON r.product_id = p.id
-            WHERE p.solution_id = %s
-            ORDER BY p.id, r.created_at DESC
-        )
-        SELECT DISTINCT c.label, c.phase
-        FROM check_item c
-        JOIN latest l ON l.release_id = c.release_id
-        ORDER BY c.phase, c.label
-        """,
-        (solution_id,),
-    ).fetchall()

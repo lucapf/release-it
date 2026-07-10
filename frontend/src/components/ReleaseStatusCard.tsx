@@ -4,23 +4,20 @@ import {
   Badge,
   Card,
   Group,
-  List,
   Loader,
   SimpleGrid,
   Stack,
   Table,
   Text,
-  ThemeIcon,
   Title,
 } from "@mantine/core";
-import { IconAlertTriangle, IconCheck, IconX } from "@tabler/icons-react";
+import { IconAlertTriangle, IconCheck } from "@tabler/icons-react";
 import { getReleaseStatus, Release } from "../api/client";
 import { StateBadge } from "./StateBadge";
 import { WorkflowActions } from "./WorkflowActions";
 
 // Per-release readiness overview: current state, allowed workflow actions, the
-// open (not-yet-closed) Jira bugs, the required-documentation checklist, and
-// outstanding pre/post checks.
+// open (not-yet-closed) tracker issues, and the uploaded document types.
 export function ReleaseStatusCard({ release }: { release: Release }) {
   const { data: status, isLoading } = useQuery({
     queryKey: ["status", release.id],
@@ -86,43 +83,24 @@ export function ReleaseStatusCard({ release }: { release: Release }) {
           )}
         </Card>
 
-        {/* Documentation + checks ----------------------------------------- */}
+        {/* Documents ------------------------------------------------------- */}
         <Card withBorder padding="md" radius="md">
-          <Title order={5} mb="xs">Documentation</Title>
-          <List spacing={4} size="sm" center>
-            {status.required_docs.map((d) => (
-              <List.Item
-                key={d.label}
-                icon={
-                  <ThemeIcon color={d.present ? "teal" : "red"} size={18} radius="xl">
-                    {d.present ? <IconCheck size={12} /> : <IconX size={12} />}
-                  </ThemeIcon>
-                }
-              >
-                {d.label}{" "}
-                {!d.present && <Text span size="xs" c="red">(missing)</Text>}
-              </List.Item>
-            ))}
-          </List>
-
-          {status.total_checks > 0 && (
-            <>
-              <Title order={5} mt="md" mb="xs">Checks</Title>
-              <Text size="sm" c={status.pending_checks ? "orange" : "teal"}>
-                {status.total_checks - status.pending_checks}/{status.total_checks} done
-                {status.pending_checks > 0 && ` · ${status.pending_checks} pending`}
-              </Text>
-            </>
+          <Title order={5} mb="xs">Documents</Title>
+          {status.present_doc_types.length === 0 ? (
+            <Text size="sm" c="dimmed">No documents uploaded.</Text>
+          ) : (
+            <Group gap={6} wrap="wrap">
+              {status.present_doc_types.map((t) => (
+                <Badge key={t} size="sm" variant="light" color="grape">{t}</Badge>
+              ))}
+            </Group>
           )}
         </Card>
       </SimpleGrid>
 
       {!status.is_ready && (
         <Alert color="orange" variant="light" title="Not ready to approve">
-          {status.open_bug_count > 0 && `${status.open_bug_count} open bug(s). `}
-          {status.missing_docs.length > 0 &&
-            `Missing docs: ${status.missing_docs.join(", ")}. `}
-          {status.pending_checks > 0 && `${status.pending_checks} pending check(s).`}
+          {status.open_bug_count > 0 && `${status.open_bug_count} open bug(s).`}
         </Alert>
       )}
     </Stack>

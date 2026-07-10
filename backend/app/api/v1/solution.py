@@ -9,7 +9,6 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from app.core.jwt_verify import ROLE_ADMIN, ROLE_RELEASE_MANAGER, require_role
 from app.db.pool import get_conn
 from app.repositories import solutions as repo
 from app.services.state_machine import StateMachine
@@ -28,7 +27,6 @@ class SolutionState(BaseModel):
     version: str
     derived_state: str | None
     products: list[dict]
-    checks: list[dict]
 
 
 def get_state_machine(request: Request) -> StateMachine:
@@ -40,8 +38,7 @@ def list_solutions(conn: psycopg.Connection = Depends(get_conn)):
     return repo.list_all(conn)
 
 
-@router.post("", status_code=201,
-             dependencies=[Depends(require_role(ROLE_ADMIN, ROLE_RELEASE_MANAGER))])
+@router.post("", status_code=201)
 def create_solution(body: SolutionCreate, conn: psycopg.Connection = Depends(get_conn)):
     return repo.create(conn, body.name, body.version)
 
@@ -64,5 +61,4 @@ def get_solution(
     return SolutionState(
         id=sol["id"], name=sol["name"], version=sol["version"],
         derived_state=derived, products=product_states,
-        checks=repo.union_checks(conn, solution_id),
     )

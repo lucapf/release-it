@@ -13,13 +13,14 @@ def record(
     operator: str | None,
     old_value: str | None = None,
     new_value: str | None = None,
+    note: str | None = None,
 ) -> None:
     conn.execute(
         """
-        INSERT INTO audit (entity_type, entity_id, action, old_value, new_value, operator)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO audit (entity_type, entity_id, action, old_value, new_value, operator, note)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
-        (entity_type, entity_id, action, old_value, new_value, operator),
+        (entity_type, entity_id, action, old_value, new_value, operator, note or None),
     )
 
 
@@ -30,7 +31,7 @@ def list_for(
     return conn.execute(
         """
         SELECT id, entity_type, entity_id, action, old_value, new_value,
-               operator, created_at
+               operator, note, created_at
         FROM audit
         WHERE entity_type = %s AND entity_id = %s
         ORDER BY created_at DESC, id DESC

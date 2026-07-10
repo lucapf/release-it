@@ -26,10 +26,10 @@ spec:
               value: "postgresql://{{ .Values.db.user }}:{{ .Values.db.password }}@{{ .Values.db.host }}:{{ .Values.db.port }}/{{ .Values.db.database }}"
             - { name: DB_POOL_MIN_SIZE, value: {{ .Values.dbPool.minSize | quote }} }
             - { name: DB_POOL_MAX_SIZE, value: {{ .Values.dbPool.maxSize | quote }} }
+            - { name: MAX_DOCUMENT_SIZE_MB, value: {{ .Values.maxDocumentSizeMb | quote }} }
             - { name: SOLUTION_ENABLED, value: {{ .Values.solutionEnabled | quote }} }
             - { name: AUTH_ENABLED, value: {{ .Values.authEnabled | quote }} }
             - { name: DEFAULT_TRANSITION_ROLES, value: {{ .Values.defaultTransitionRoles | quote }} }
-            - { name: REQUIRED_DOCS, value: {{ .Values.requiredDocs | quote }} }
             - { name: CLOSED_BUG_STATUSES, value: {{ .Values.closedBugStatuses | quote }} }
             - { name: JWT_ISSUER, value: {{ .Values.jwt.issuer | quote }} }
             - { name: JWT_AUDIENCE, value: {{ .Values.jwt.audience | quote }} }

@@ -14,7 +14,6 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
-from app.core.jwt_verify import ROLE_ADMIN, require_role
 from app.db.pool import get_conn
 from app.schemas.models import (
     Workflow,
@@ -75,8 +74,7 @@ def export_workflow(conn: psycopg.Connection = Depends(get_conn)):
     )
 
 
-@router.put("", response_model=Workflow,
-            dependencies=[Depends(require_role(ROLE_ADMIN))])
+@router.put("", response_model=Workflow)
 def update_workflow(
     body: WorkflowUpdate,
     request: Request,

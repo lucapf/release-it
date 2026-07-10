@@ -40,8 +40,17 @@ spec:
       volumes:
         - name: initdb
           configMap: { name: releaseit-db-initdb }
+        {{- if not .Values.persistence.enabled }}
+        # Ephemeral storage: the database lives in the pod and is wiped on
+        # restart. Used for throwaway runs (e.g. e2e tests) where a clean slate
+        # on every install is desirable and there are no PVs/PVCs to clean up.
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.persistence.enabled }}
   volumeClaimTemplates:
     - metadata: { name: data }
       spec:
         accessModes: ["ReadWriteOnce"]
         resources: { requests: { storage: {{ .Values.storage }} } }
+  {{- end }}

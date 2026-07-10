@@ -301,7 +301,7 @@ export function DashboardPage() {
           <EmptyState
             icon={IconBox}
             title="No products yet"
-            description="Create your first product to start tracking its releases, checks and approvals."
+            description="Create your first product to start tracking its releases and approvals."
             action={
               <Button mt="sm" leftSection={<IconPlus size={16} />} onClick={open}>
                 New product

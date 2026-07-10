@@ -5,12 +5,6 @@ import psycopg
 from psycopg import errors as pg_errors
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.jwt_verify import (
-    ROLE_ADMIN,
-    ROLE_DEVELOPER,
-    ROLE_RELEASE_MANAGER,
-    require_role,
-)
 from app.db.pool import get_conn
 from app.repositories import products as repo
 from app.repositories import releases as releases_repo
@@ -37,8 +31,7 @@ def products_overview(conn: psycopg.Connection = Depends(get_conn)):
     return repo.overview(conn)
 
 
-@router.post("", response_model=Product, status_code=201,
-             dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.post("", response_model=Product, status_code=201)
 def create_product(body: ProductCreate, conn: psycopg.Connection = Depends(get_conn)):
     return repo.create(conn, body.name, body.solution_id, body.tracker_repo)
 
@@ -51,8 +44,7 @@ def get_product(product_id: int, conn: psycopg.Connection = Depends(get_conn)):
     return row
 
 
-@router.patch("/{product_id}", response_model=Product,
-              dependencies=[Depends(require_role(ROLE_DEVELOPER, ROLE_RELEASE_MANAGER, ROLE_ADMIN))])
+@router.patch("/{product_id}", response_model=Product)
 def update_product(
     product_id: int, body: ProductUpdate, conn: psycopg.Connection = Depends(get_conn)
 ):
@@ -79,8 +71,7 @@ def list_product_releases(product_id: int, conn: psycopg.Connection = Depends(ge
     return releases_repo.list_by_product(conn, product_id)
 
 
-@router.delete("/{product_id}", status_code=204,
-               dependencies=[Depends(require_role(ROLE_ADMIN))])
+@router.delete("/{product_id}", status_code=204)
 def delete_product(product_id: int, conn: psycopg.Connection = Depends(get_conn)):
     if not repo.delete(conn, product_id):
         raise HTTPException(404, "Product not found")

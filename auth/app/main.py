@@ -5,17 +5,22 @@ backend only needs this service's issuer, audience and JWKS URL.
 """
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import authz
 from app.config import settings
 from app.db import apply_migrations, close_pool, connection, open_pool
 from app.keys import jwks
 from app.security import hash_password
 from app.user_management import router as user_router
 from app import users_repo
+
+log = logging.getLogger("releaseit.auth")
 
 
 # Passwords too weak/guessable to ever seed an admin account with.
@@ -77,6 +82,66 @@ app.add_middleware(
 )
 
 app.include_router(user_router, prefix="/api/v1/user-management", tags=["user-management"])
+
+
+@app.api_route("/auth", methods=["GET", "POST"], tags=["authz"])
+async def authorize_request(request: Request) -> Response:
+    """External authorization endpoint.
+
+    Validates the JWT (signature + expiry) and checks the requested
+    (method, url) against the role policy. Returns 200 if authorized, 403 if not.
+
+    Inputs are taken from (in order):
+      * a JSON body ``{url, method, token, ...}`` — for direct/API callers
+        (extra parameters are accepted and ignored);
+      * the ``X-Original-Method`` / ``X-Original-URI`` headers and the
+        ``Authorization`` bearer header — set by an nginx ``auth_request`` /
+        ingress forward-auth subrequest.
+
+    On a 200 the caller's identity is returned as ``X-Auth-Subject`` and
+    ``X-Auth-Roles`` headers, which the gateway propagates to the upstream
+    service (the backend trusts these instead of validating the token itself).
+    """
+    body: dict = {}
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+    method = body.get("method") or request.headers.get("x-original-method") or "GET"
+    url = (
+        body.get("url")
+        or request.headers.get("x-original-uri")
+        or request.headers.get("x-original-url")
+        or ""
+    )
+    token = body.get("token")
+    if not token:
+        authorization = request.headers.get("authorization", "")
+        if authorization.lower().startswith("bearer "):
+            token = authorization.split(" ", 1)[1].strip()
+
+    decision = authz.decide(method, url, token or "")
+    if not decision.allowed:
+        # Log every denial (a "lack of permissions" event) so it is auditable.
+        # The path only — never the token or query string — is recorded.
+        if decision.subject:
+            reason = (
+                f"caller '{decision.subject}' with roles "
+                f"[{', '.join(decision.roles) or 'none'}] is not permitted"
+            )
+        else:
+            reason = "missing, invalid or expired token"
+        log.warning("authorization denied: %s %s — %s", method, urlsplit(url).path or url, reason)
+        return Response(status_code=status.HTTP_403_FORBIDDEN)
+    return Response(
+        status_code=status.HTTP_200_OK,
+        headers={
+            "X-Auth-Subject": decision.subject,
+            "X-Auth-Roles": ",".join(decision.roles),
+        },
+    )
 
 
 @app.get("/.well-known/jwks.json", tags=["oidc"])

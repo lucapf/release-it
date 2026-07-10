@@ -1,4 +1,4 @@
-"""Release data access (releases, checks, artifacts, docs) — raw SQL via psycopg3."""
+"""Release data access (releases, artifacts, docs) — raw SQL via psycopg3."""
 from __future__ import annotations
 
 import psycopg
@@ -41,6 +41,14 @@ def list_by_product(conn: psycopg.Connection, product_id: int) -> list[dict]:
     ).fetchall()
 
 
+def list_all(conn: psycopg.Connection) -> list[dict]:
+    """Every release across all products (newest first per product). Used by the
+    assistant to build a cross-product status report."""
+    return conn.execute(
+        f"SELECT {_REL_COLS} FROM release ORDER BY product_id, created_at DESC"
+    ).fetchall()
+
+
 def set_state(conn: psycopg.Connection, release_id: int, state: str) -> dict | None:
     return conn.execute(
         f"UPDATE release SET state = %s WHERE id = %s RETURNING {_REL_COLS}",
@@ -49,47 +57,10 @@ def set_state(conn: psycopg.Connection, release_id: int, state: str) -> dict | N
 
 
 def delete(conn: psycopg.Connection, release_id: int) -> bool:
-    """Delete a release. Child rows (checks, artifacts, documentation, synced
-    issues, sync filter) cascade via their FKs; inherited releases keep their
+    """Delete a release. Child rows (artifacts, documents, synced issues,
+    sync filter) cascade via their FKs; inherited releases keep their
     history with parent_release_id reset to NULL."""
     cur = conn.execute("DELETE FROM release WHERE id = %s", (release_id,))
-    return cur.rowcount > 0
-
-
-# --- Checks ----------------------------------------------------------------
-def add_check(conn: psycopg.Connection, release_id: int, label: str, phase: str) -> dict:
-    return conn.execute(
-        """
-        INSERT INTO check_item (release_id, label, phase)
-        VALUES (%s, %s, %s)
-        RETURNING id, release_id, label, phase, done, created_at
-        """,
-        (release_id, label, phase),
-    ).fetchone()
-
-
-def list_checks(conn: psycopg.Connection, release_id: int) -> list[dict]:
-    return conn.execute(
-        """
-        SELECT id, release_id, label, phase, done, created_at
-        FROM check_item WHERE release_id = %s ORDER BY phase, id
-        """,
-        (release_id,),
-    ).fetchall()
-
-
-def set_check_done(conn: psycopg.Connection, check_id: int, done: bool) -> dict | None:
-    return conn.execute(
-        """
-        UPDATE check_item SET done = %s WHERE id = %s
-        RETURNING id, release_id, label, phase, done, created_at
-        """,
-        (done, check_id),
-    ).fetchone()
-
-
-def delete_check(conn: psycopg.Connection, check_id: int) -> bool:
-    cur = conn.execute("DELETE FROM check_item WHERE id = %s", (check_id,))
     return cur.rowcount > 0
 
 
@@ -123,57 +94,13 @@ def get_artifact_content(conn: psycopg.Connection, artifact_id: int) -> dict | N
     ).fetchone()
 
 
-# --- Documentation (bytea) -------------------------------------------------
-def add_documentation(
-    conn: psycopg.Connection,
-    release_id: int,
-    name: str,
-    content_type: str,
-    content: bytes,
-    is_draft: bool,
-) -> dict:
-    return conn.execute(
-        """
-        INSERT INTO documentation (release_id, name, content_type, content, is_draft)
-        VALUES (%s, %s, %s, %s, %s)
-        RETURNING id, release_id, name, content_type, is_draft, created_at
-        """,
-        (release_id, name, content_type, content, is_draft),
-    ).fetchone()
-
-
-def list_documentation(conn: psycopg.Connection, release_id: int) -> list[dict]:
-    return conn.execute(
-        """
-        SELECT id, release_id, name, content_type, is_draft, created_at
-        FROM documentation WHERE release_id = %s ORDER BY id
-        """,
-        (release_id,),
-    ).fetchall()
-
-
 # --- Inheritance: clone assets of a rejected release into a new one ---------
 def clone_assets(conn: psycopg.Connection, source_id: int, target_id: int) -> None:
-    """Copy checks, artifacts and documentation from source release to target."""
-    conn.execute(
-        """
-        INSERT INTO check_item (release_id, label, phase, done)
-        SELECT %s, label, phase, false FROM check_item WHERE release_id = %s
-        """,
-        (target_id, source_id),
-    )
+    """Copy artifacts from source release to target."""
     conn.execute(
         """
         INSERT INTO artifact (release_id, name, content_type, content)
         SELECT %s, name, content_type, content FROM artifact WHERE release_id = %s
-        """,
-        (target_id, source_id),
-    )
-    conn.execute(
-        """
-        INSERT INTO documentation (release_id, name, content_type, content, is_draft)
-        SELECT %s, name, content_type, content, is_draft
-        FROM documentation WHERE release_id = %s
         """,
         (target_id, source_id),
     )

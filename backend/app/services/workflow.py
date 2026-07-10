@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import psycopg
 
-from app.core.jwt_verify import ALL_ROLES
+from app.core.identity import ALL_ROLES
 from app.repositories import config as config_repo
 from app.repositories import workflow as repo
 from app.services import appconfig

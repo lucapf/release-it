@@ -1,4 +1,5 @@
-import { Box, Button, Group, Text, Tooltip } from "@mantine/core";
+import { useState } from "react";
+import { Box, Button, Group, Modal, Stack, Text, Textarea, Tooltip } from "@mantine/core";
 import { IconAlertTriangle, IconLock } from "@tabler/icons-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { notifications } from "@mantine/notifications";
@@ -16,10 +17,6 @@ function unmetRequirements(
   const reasons: string[] = [];
   if (requires.includes("no_open_issues") && status.open_bug_count > 0)
     reasons.push(`${status.open_bug_count} open issue(s) must be closed`);
-  if (requires.includes("docs_complete") && status.missing_docs.length > 0)
-    reasons.push(`missing docs: ${status.missing_docs.join(", ")}`);
-  if (requires.includes("checks_done") && status.pending_checks > 0)
-    reasons.push(`${status.pending_checks} check(s) pending`);
   // Parameterised guard: document:<TypeName> needs an uploaded document of that type.
   const present = new Set(status.present_doc_types ?? []);
   requires
@@ -53,18 +50,32 @@ export function WorkflowActions({
     staleTime: Infinity,
   });
 
+  // The transition awaiting confirmation, and the optional note the operator is
+  // attaching to it. Clicking a transition opens the note dialog rather than
+  // firing immediately, so a comment can always be added (it stays optional).
+  const [pending, setPending] = useState<string | null>(null);
+  const [note, setNote] = useState("");
+
   const move = useMutation({
-    mutationFn: (transition: string) => transitionRelease(release.id, transition),
-    onSuccess: (_data, transition) => {
+    mutationFn: ({ transition, note }: { transition: string; note: string }) =>
+      transitionRelease(release.id, transition, note),
+    onSuccess: (_data, { transition }) => {
       qc.invalidateQueries({ queryKey: ["releases", release.product_id] });
       qc.invalidateQueries({ queryKey: ["overview"] });
       qc.invalidateQueries({ queryKey: ["status", release.id] });
       qc.invalidateQueries({ queryKey: ["history", release.id] });
       notifications.show({ message: `Applied "${transition}"`, color: "teal" });
+      setPending(null);
+      setNote("");
       onChanged?.();
     },
     onError: (e: any) => notifyApiError(e, "Transition not allowed"),
   });
+
+  const openNote = (transition: string) => {
+    setNote("");
+    setPending(transition);
+  };
 
   const state = workflow?.states.find((s) => s.name === release.state);
   if (!state) return null;
@@ -105,8 +116,8 @@ export function WorkflowActions({
                 leftSection={
                   !permitted ? <IconLock size={13} /> : blocked ? <IconAlertTriangle size={13} /> : undefined
                 }
-                loading={move.isPending && move.variables === t.name}
-                onClick={() => move.mutate(t.name)}
+                loading={move.isPending && move.variables?.transition === t.name}
+                onClick={() => openNote(t.name)}
               >
                 {t.name}
               </Button>
@@ -119,6 +130,37 @@ export function WorkflowActions({
           Locked actions need: {[...blockedRoles].join(", ")}
         </Text>
       )}
+
+      <Modal
+        opened={pending !== null}
+        onClose={() => setPending(null)}
+        title={`Apply "${pending}" to v${release.version}`}
+        centered
+      >
+        <Stack gap="md">
+          <Textarea
+            label="Note"
+            description="Optional — add a comment explaining this state change."
+            placeholder="e.g. Approved after sign-off from QA"
+            autosize
+            minRows={3}
+            value={note}
+            onChange={(e) => setNote(e.currentTarget.value)}
+            data-autofocus
+          />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setPending(null)}>
+              Cancel
+            </Button>
+            <Button
+              loading={move.isPending}
+              onClick={() => pending && move.mutate({ transition: pending, note })}
+            >
+              Apply
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
     </Group>
   );
 }

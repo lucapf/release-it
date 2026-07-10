@@ -53,8 +53,11 @@ log "Resolving umbrella subchart dependencies"
 helm dependency build "${UMBRELLA_DIR}"
 
 log "Deploying the release-it umbrella chart"
+# HELM_EXTRA_ARGS lets callers pass extra flags (e.g. the e2e suite disables the
+# DB's persistent volume with --set releaseit-db.persistence.enabled=false).
 helm upgrade --install "$RELEASE" "${UMBRELLA_DIR}" \
-  --namespace "$NAMESPACE" --create-namespace --wait --timeout 5m
+  --namespace "$NAMESPACE" --create-namespace --wait --timeout 5m \
+  ${HELM_EXTRA_ARGS:-}
 
 # A rebuilt :latest image won't restart pods on its own; roll the app
 # Deployments to pick it up. The DB StatefulSet is left running to keep data.

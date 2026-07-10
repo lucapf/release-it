@@ -38,5 +38,10 @@ class Settings(BaseSettings):
     migrations_dir: str = "migrations"
     cors_origins: str = "*"
 
+    # External-authorization policy for POST /auth. Path to a YAML policy file,
+    # normally a mounted configMap (the Helm chart sets this). Empty = use the
+    # bundled default policy shipped at app/authz_policy.yaml.
+    authz_policy_file: str = ""
+
 
 settings = Settings()

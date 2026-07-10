@@ -21,7 +21,7 @@ class Transition:
     # state machine's default roles" (resolved by callers, not stored here).
     roles: frozenset[str] = frozenset()
     # Readiness requirements (guards) that must be satisfied before this
-    # transition is allowed, e.g. "no_open_issues", "docs_complete". Empty means
+    # transition is allowed, e.g. "no_open_issues". Empty means
     # the transition is unguarded. The state machine carries these declaratively;
     # the release API evaluates them against the release's current status.
     requires: frozenset[str] = frozenset()
@@ -38,9 +38,9 @@ class State:
         return not self.transitions
 
 
-# Readiness guards a transition may declare in `requires`. Mirrors the checks
-# evaluated by the release API (see release._unmet_requirements).
-KNOWN_GUARDS = frozenset({"no_open_issues", "docs_complete", "checks_done"})
+# Readiness guards a transition may declare in `requires`. Mirrors the guards
+# evaluated by the release API (see release_status.unmet_requirements).
+KNOWN_GUARDS = frozenset({"no_open_issues"})
 
 # Parameterised guard: ``document:<TypeName>`` requires that at least one document
 # of that type has been uploaded to the release before the transition is allowed.
@@ -64,7 +64,7 @@ _YAML_HEADER = (
     "#\n"
     "# Exported from the database-backed workflow. Each transition may declare\n"
     "# `roles` (who may perform it) and `requires` (readiness guards:\n"
-    "# no_open_issues, docs_complete, checks_done, or document:<TypeName> to\n"
+    "# no_open_issues, or document:<TypeName> to\n"
     "# require an uploaded document of that type).\n"
 )
 

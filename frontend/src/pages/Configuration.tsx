@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
@@ -13,6 +13,7 @@ import {
   Loader,
   Modal,
   MultiSelect,
+  NumberInput,
   PasswordInput,
   SegmentedControl,
   Select,
@@ -38,14 +39,12 @@ import {
   IconVersions,
 } from "@tabler/icons-react";
 import {
+  getAssistantCapabilities,
   getConfig,
   updateConfig,
   getWorkflow,
   updateWorkflow,
   exportWorkflowYaml,
-  listCheckTemplates,
-  addCheckTemplate,
-  deleteCheckTemplate,
   listDocumentTypes,
   addDocumentType,
   deleteDocumentType,
@@ -62,7 +61,6 @@ import {
   Workflow,
   GUARDS,
   ROLES,
-  Phase,
 } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { notifyApiError } from "../lib/errors";
@@ -447,6 +445,7 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
   const { data: cfg, isLoading } = useQuery({ queryKey: ["config"], queryFn: getConfig });
 
   const [provider, setProvider] = useState<"jira" | "github">("jira");
+  const [syncMinutes, setSyncMinutes] = useState<number>(10);
   const [jiraEnabled, setJiraEnabled] = useState(false);
   const [jiraUrl, setJiraUrl] = useState("");
   const [jiraToken, setJiraToken] = useState("");
@@ -458,6 +457,7 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
   useEffect(() => {
     if (!cfg) return;
     setProvider(cfg.tracker_provider);
+    setSyncMinutes(cfg.sync_interval_minutes);
     setJiraEnabled(cfg.jira.enabled);
     setJiraUrl(cfg.jira.base_url);
     setGhEnabled(cfg.github.enabled);
@@ -468,6 +468,7 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
     mutationFn: () => {
       const body: ConfigUpdate = {
         tracker_provider: provider,
+        sync_interval_minutes: syncMinutes,
         jira_enabled: jiraEnabled,
         jira_base_url: jiraUrl,
         github_enabled: ghEnabled,
@@ -512,6 +513,19 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
         value={provider}
         onChange={(v) => setProvider(v as "jira" | "github")}
         disabled={!canEdit}
+        mb="lg"
+      />
+
+      <NumberInput
+        label="Scheduled sync (minutes)"
+        description="Every running release's issues are re-synced from the tracker on this schedule. Set 0 to disable. Default: every 10 minutes."
+        min={0}
+        step={1}
+        allowDecimal={false}
+        value={syncMinutes}
+        onChange={(v) => setSyncMinutes(typeof v === "number" ? v : 10)}
+        disabled={!canEdit}
+        maw={280}
         mb="lg"
       />
 
@@ -585,208 +599,6 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
       {canEdit && (
         <Group justify="flex-end" mt="lg">
           <Button loading={save.isPending} onClick={() => save.mutate()}>Save configuration</Button>
-        </Group>
-      )}
-    </Card>
-  );
-}
-
-// --- LLM engine configuration ----------------------------------------------
-function LLMSection({ canEdit }: { canEdit: boolean }) {
-  const qc = useQueryClient();
-  const { data: cfg, isLoading } = useQuery({ queryKey: ["config"], queryFn: getConfig });
-
-  const [provider, setProvider] = useState<"claude" | "ollama">("claude");
-  const [claudeModel, setClaudeModel] = useState("");
-  const [claudeKey, setClaudeKey] = useState("");
-  const [ollamaUrl, setOllamaUrl] = useState("");
-  const [ollamaModel, setOllamaModel] = useState("");
-
-  useEffect(() => {
-    if (!cfg) return;
-    setProvider(cfg.llm.provider);
-    setClaudeModel(cfg.llm.claude.model);
-    setOllamaUrl(cfg.llm.ollama.base_url);
-    setOllamaModel(cfg.llm.ollama.model);
-  }, [cfg]);
-
-  const save = useMutation({
-    mutationFn: () => {
-      const body: ConfigUpdate = {
-        llm_provider: provider,
-        claude_model: claudeModel,
-        ollama_base_url: ollamaUrl,
-        ollama_model: ollamaModel,
-      };
-      if (claudeKey) body.claude_api_key = claudeKey; // write-only: blank = keep existing
-      return updateConfig(body);
-    },
-    onSuccess: (data) => {
-      qc.setQueryData(["config"], data);
-      setClaudeKey("");
-      notifications.show({ message: "LLM configuration saved", color: "teal" });
-    },
-    onError: (e: any) => notifyApiError(e, "Save failed"),
-  });
-
-  if (isLoading || !cfg) return <Loader />;
-
-  return (
-    <Card withBorder radius="md" padding="lg">
-      <Group justify="space-between" mb="md">
-        <div>
-          <Title order={4}>LLM engine</Title>
-          <Text c="dimmed" size="sm">Used to draft release notes from tracked issues.</Text>
-        </div>
-        <Badge size="lg" variant="light" color={provider === "ollama" ? "grape" : "indigo"}>
-          active: {provider}
-        </Badge>
-      </Group>
-
-      {!canEdit && (
-        <Alert color="gray" variant="light" mb="md">
-          You need the Administrator role to change these settings.
-        </Alert>
-      )}
-
-      <Text size="sm" fw={600} mb={4}>Engine</Text>
-      <SegmentedControl
-        data={[{ value: "claude", label: "Claude (Anthropic)" }, { value: "ollama", label: "Ollama (local)" }]}
-        value={provider}
-        onChange={(v) => setProvider(v as "claude" | "ollama")}
-        disabled={!canEdit}
-        mb="lg"
-      />
-
-      <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
-        <Stack gap="sm">
-          <Text fw={600}>Claude</Text>
-          <TextInput
-            label="Model"
-            placeholder="claude-opus-4-8"
-            value={claudeModel}
-            onChange={(e) => setClaudeModel(e.currentTarget.value)}
-            disabled={!canEdit}
-          />
-          <PasswordInput
-            label="API key"
-            placeholder={cfg.llm.claude.api_key_set ? "•••••••• (stored)" : "not set"}
-            value={claudeKey}
-            onChange={(e) => setClaudeKey(e.currentTarget.value)}
-            disabled={!canEdit}
-            description="Leave blank to keep the current key."
-          />
-        </Stack>
-
-        <Stack gap="sm">
-          <Text fw={600}>Ollama</Text>
-          <TextInput
-            label="Server URL"
-            placeholder="http://localhost:11434"
-            value={ollamaUrl}
-            onChange={(e) => setOllamaUrl(e.currentTarget.value)}
-            disabled={!canEdit}
-          />
-          <TextInput
-            label="Model"
-            placeholder="llama3"
-            value={ollamaModel}
-            onChange={(e) => setOllamaModel(e.currentTarget.value)}
-            disabled={!canEdit}
-          />
-        </Stack>
-      </SimpleGrid>
-
-      {canEdit && (
-        <Group justify="flex-end" mt="lg">
-          <Button loading={save.isPending} onClick={() => save.mutate()}>Save LLM configuration</Button>
-        </Group>
-      )}
-    </Card>
-  );
-}
-
-// --- Default check templates -----------------------------------------------
-function CheckTemplatesSection({ canEdit }: { canEdit: boolean }) {
-  const qc = useQueryClient();
-  const key = ["check-templates"];
-  const { data: templates = [], isLoading } = useQuery({ queryKey: key, queryFn: listCheckTemplates });
-  const [label, setLabel] = useState("");
-  const [phase, setPhase] = useState<Phase>("pre");
-  const invalidate = () => qc.invalidateQueries({ queryKey: key });
-
-  const add = useMutation({
-    mutationFn: () => addCheckTemplate(label, phase),
-    onSuccess: () => { setLabel(""); invalidate(); notifications.show({ message: "Template added", color: "teal" }); },
-    onError: (e: any) => notifyApiError(e, "Could not add check template"),
-  });
-  const remove = useMutation({
-    mutationFn: (id: number) => deleteCheckTemplate(id),
-    onSuccess: invalidate,
-  });
-
-  return (
-    <Card withBorder radius="md" padding="lg">
-      <Title order={4} mb={4}>Default checks</Title>
-      <Text c="dimmed" size="sm" mb="md">
-        These pre/post checks are automatically added to every new release.
-      </Text>
-
-      {isLoading ? (
-        <Loader />
-      ) : templates.length === 0 ? (
-        <Text c="dimmed" size="sm" mb="md">No default checks configured.</Text>
-      ) : (
-        <Table mb="md">
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>Phase</Table.Th>
-              <Table.Th>Check</Table.Th>
-              {canEdit && <Table.Th w={48} />}
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {templates.map((t) => (
-              <Table.Tr key={t.id}>
-                <Table.Td>
-                  <Badge size="sm" variant="light" color={t.phase === "pre" ? "blue" : "grape"}>
-                    {t.phase}
-                  </Badge>
-                </Table.Td>
-                <Table.Td>{t.label}</Table.Td>
-                {canEdit && (
-                  <Table.Td>
-                    <ActionIcon variant="subtle" color="red" onClick={() => remove.mutate(t.id)} aria-label="Delete">
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </Table.Td>
-                )}
-              </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
-      )}
-
-      {canEdit && (
-        <Group align="flex-end" gap="sm">
-          <Select
-            label="Phase"
-            data={[{ value: "pre", label: "pre" }, { value: "post", label: "post" }]}
-            value={phase}
-            onChange={(v) => setPhase((v as Phase) ?? "pre")}
-            maw={120}
-            allowDeselect={false}
-          />
-          <TextInput
-            label="Check label"
-            placeholder="e.g. Smoke test passed"
-            value={label}
-            onChange={(e) => setLabel(e.currentTarget.value)}
-            style={{ flex: 1 }}
-          />
-          <Button disabled={!label} loading={add.isPending} onClick={() => add.mutate()}>
-            Add check
-          </Button>
         </Group>
       )}
     </Card>
@@ -875,6 +687,60 @@ function DocumentTypesSection({ canEdit }: { canEdit: boolean }) {
             Add type
           </Button>
         </Group>
+      )}
+    </Card>
+  );
+}
+
+// --- Assistant actions: what the LLM assistant is capable of ----------------
+// Read-only: the list is described by the backend from the assistant's live
+// tool registry, so it can never drift from what the model can actually do.
+function AssistantActionsSection() {
+  const { data, isLoading } = useQuery({
+    queryKey: ["assistant-capabilities"],
+    queryFn: getAssistantCapabilities,
+  });
+
+  return (
+    <Card withBorder radius="md" padding="lg">
+      <Title order={4} mb={4}>Assistant actions</Title>
+      <Text c="dimmed" size="sm" mb="md">
+        Everything the LLM assistant can do on an operator's behalf. Every action
+        goes through the same role and readiness checks as the UI, and each one the
+        assistant performs is reported back in the chat.
+      </Text>
+
+      {isLoading || !data ? (
+        <Loader />
+      ) : (
+        <Table.ScrollContainer minWidth={520}>
+          <Table verticalSpacing="sm" highlightOnHover>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Action</Table.Th>
+                <Table.Th w={90}>Type</Table.Th>
+                <Table.Th>What it does</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {data.actions.map((a) => (
+                <Table.Tr key={a.name}>
+                  <Table.Td fw={600} style={{ whiteSpace: "nowrap" }}>
+                    <code>{a.name}</code>
+                  </Table.Td>
+                  <Table.Td>
+                    <Badge size="sm" variant="light" color={a.kind === "action" ? "orange" : "blue"}>
+                      {a.kind === "action" ? "action" : "read"}
+                    </Badge>
+                  </Table.Td>
+                  <Table.Td>
+                    <Text size="sm">{a.description}</Text>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       )}
     </Card>
   );
@@ -1169,69 +1035,87 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
   );
 }
 
-const SECTIONS = [
-  { id: "projects", label: "Projects" },
-  { id: "checks", label: "Default checks" },
-  { id: "document-types", label: "Document types" },
-  { id: "workflow", label: "Release workflow" },
-  { id: "tracker", label: "Issue tracker" },
-  { id: "llm", label: "LLM engine" },
+// The Configuration sub-pages, in nav order. Each renders on its own dedicated
+// route at /configuration/<path>. Default checks come last; the LLM engine is
+// also one of these sub-pages (its component lives in ./Llm).
+export const CONFIG_SECTIONS = [
+  { path: "projects", label: "Projects" },
+  { path: "users", label: "Users" },
+  { path: "document-types", label: "Document types" },
+  { path: "workflow", label: "Release workflow" },
+  { path: "tracker", label: "Issue tracker" },
+  { path: "assistant-actions", label: "Assistant actions" },
+  { path: "llm", label: "LLM engine" },
 ];
 
-function scrollToSection(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-// Offsets the scroll target below the fixed app header so the section title
-// isn't hidden under it.
-const anchorStyle = { scrollMarginTop: 80 };
-
-export function ConfigurationPage() {
-  const { hasRole } = useAuth();
-  const isAdmin = hasRole("Administrator");
-  const canManageChecks = hasRole("Administrator", "Release Manager");
-
+// Shared page frame for every Configuration sub-page: an order-2 heading and
+// description above the section card.
+function ConfigPage({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
   return (
     <Stack gap="lg">
       <div>
-        <Title order={2}>Configuration</Title>
-        <Text c="dimmed">Projects, default checks, document types, release workflow, issue tracker and LLM engine.</Text>
+        <Title order={2}>{title}</Title>
+        <Text c="dimmed">{description}</Text>
       </div>
-
-      <Card withBorder radius="md" padding="sm">
-        <Group gap="xs" wrap="wrap">
-          <Text size="sm" fw={600} c="dimmed">Jump to:</Text>
-          {SECTIONS.map((s) => (
-            <Button
-              key={s.id}
-              size="compact-sm"
-              variant="subtle"
-              onClick={() => scrollToSection(s.id)}
-            >
-              {s.label}
-            </Button>
-          ))}
-        </Group>
-      </Card>
-
-      <div id="projects" style={anchorStyle}>
-        <ProjectsSection canEdit={canManageChecks} canDelete={isAdmin} />
-      </div>
-      <div id="checks" style={anchorStyle}>
-        <CheckTemplatesSection canEdit={canManageChecks} />
-      </div>
-      <div id="document-types" style={anchorStyle}>
-        <DocumentTypesSection canEdit={canManageChecks} />
-      </div>
-      <div id="workflow" style={anchorStyle}>
-        <WorkflowSection canEdit={isAdmin} />
-      </div>
-      <div id="tracker" style={anchorStyle}>
-        <TrackerSection canEdit={isAdmin} />
-      </div>
-      <div id="llm" style={anchorStyle}>
-        <LLMSection canEdit={isAdmin} />
-      </div>
+      {children}
     </Stack>
+  );
+}
+
+export function ProjectsPage() {
+  const { hasRole } = useAuth();
+  return (
+    <ConfigPage title="Projects" description="Manage each project's standard configuration and lifecycle.">
+      <ProjectsSection
+        canEdit={hasRole("Administrator", "Release Manager")}
+        canDelete={hasRole("Administrator")}
+      />
+    </ConfigPage>
+  );
+}
+
+export function DocumentTypesPage() {
+  const { hasRole } = useAuth();
+  return (
+    <ConfigPage title="Document types" description="The supported types operators can classify uploaded documents with.">
+      <DocumentTypesSection canEdit={hasRole("Administrator", "Release Manager")} />
+    </ConfigPage>
+  );
+}
+
+export function WorkflowPage() {
+  const { hasRole } = useAuth();
+  return (
+    <ConfigPage title="Release workflow" description="The database-backed state graph releases move through.">
+      <WorkflowSection canEdit={hasRole("Administrator")} />
+    </ConfigPage>
+  );
+}
+
+export function TrackerPage() {
+  const { hasRole } = useAuth();
+  return (
+    <ConfigPage title="Issue tracker" description="Configure tracker access for syncing issues.">
+      <TrackerSection canEdit={hasRole("Administrator")} />
+    </ConfigPage>
+  );
+}
+
+export function AssistantActionsPage() {
+  return (
+    <ConfigPage
+      title="Assistant actions"
+      description="What the LLM assistant is capable of doing on an operator's behalf."
+    >
+      <AssistantActionsSection />
+    </ConfigPage>
   );
 }

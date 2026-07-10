@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # Allow disabling auth for local development / tests only.
     auth_enabled: bool = True
 
+    # --- Documents ----------------------------------------------------------
+    # Maximum size of a single uploaded document version, in megabytes. Uploads
+    # larger than this are rejected with HTTP 413.
+    max_document_size_mb: int = 10
+
     # --- Release state machine ---------------------------------------------
     # The workflow graph is database-backed (seeded by the workflow migration).
     # Roles allowed to perform a transition that does not declare its own
@@ -38,10 +43,6 @@ class Settings(BaseSettings):
     default_transition_roles: str = "QA Manager,Release Manager,Administrator"
 
     # --- Release readiness rules -------------------------------------------
-    # Documentation a release must carry before it is considered complete,
-    # as ``Label=keyword`` pairs (keyword matched case-insensitively against
-    # the published — non-draft — document file names). Comma-separated.
-    required_docs: str = "Release Notes=release-notes,Installation Guide=install"
     # Jira issue statuses that count as "closed". Everything else is open.
     closed_bug_statuses: str = "Done"
 
@@ -49,6 +50,11 @@ class Settings(BaseSettings):
     # Active issue tracker: "jira" or "github". These are the seed defaults;
     # the runtime configuration page (app_config table) overrides them.
     tracker_provider: str = "jira"
+
+    # How often (in minutes) the background scheduler re-syncs every running
+    # release's issues from the active tracker. 0 disables the scheduled sync.
+    # Editable at runtime on the configuration page (app_config overrides this).
+    sync_interval_minutes: int = 10
 
     # --- Integrations (optional, token auth) --------------------------------
     jira_enabled: bool = False

@@ -10,11 +10,13 @@ authEnabled: true
 # workflow migration and edited at runtime on the configuration page.
 corsOrigins: "*"
 
+# Maximum size of a single uploaded document version, in megabytes. Uploads
+# larger than this are rejected with HTTP 413.
+maxDocumentSizeMb: 10
+
 # Release workflow / readiness rules.
 # Roles allowed to perform a transition that doesn't set its own `roles` in states.yaml.
 defaultTransitionRoles: "QA Manager,Release Manager,Administrator"
-# Required documentation as `Label=keyword` pairs (keyword matched against published doc names).
-requiredDocs: "Release Notes=release-notes,Installation Guide=install"
 # Jira issue statuses that count as "closed". Everything else is open.
 closedBugStatuses: "Done"
 

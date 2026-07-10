@@ -36,6 +36,20 @@ spec:
             - { name: AUTH_ALLOW_INSECURE_BOOTSTRAP, value: {{ .Values.auth.bootstrapAdmin.allowInsecure | default false | quote }} }
             - { name: AUTH_MIGRATIONS_DIR, value: {{ .Values.auth.migrationsDir | quote }} }
             - { name: AUTH_CORS_ORIGINS, value: {{ .Values.auth.corsOrigins | quote }} }
+            # Authorization policy for POST /auth, mounted from the configMap.
+            - { name: AUTH_AUTHZ_POLICY_FILE, value: /etc/releaseit-auth/authz-policy.yaml }
           ports: [{ containerPort: 8001 }]
+          volumeMounts:
+            - name: authz-policy
+              mountPath: /etc/releaseit-auth
+              readOnly: true
           readinessProbe:
             httpGet: { path: /health, port: 8001 }
+      volumes:
+        # Shared authorization policy, provided by the umbrella chart's
+        # releaseit-authz-policy configMap (common to the services). Optional so
+        # the auth chart still runs standalone (falls back to its bundled policy).
+        - name: authz-policy
+          configMap:
+            name: {{ .Values.auth.authzConfigMap }}
+            optional: true

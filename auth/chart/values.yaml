@@ -22,6 +22,10 @@ auth:
   dbPool:
     minSize: 1
     maxSize: 5
+  # Name of the configMap holding the shared authorization policy consumed by
+  # POST /auth. Provided by the umbrella chart (authzPolicy value). When absent
+  # (standalone auth chart) the service falls back to its bundled default policy.
+  authzConfigMap: releaseit-authz-policy
 
 # Connection to the shared PostgreSQL instance (releaseit-db chart). The auth
 # service logs in as its own role, whose search_path is pinned to the `auth`

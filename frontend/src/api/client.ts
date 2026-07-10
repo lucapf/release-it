@@ -57,33 +57,43 @@ export interface ProductOverview extends Product {
   draft: Release | null;
   under_approval: Release | null;
 }
-export interface Environment { id: number; name: string; description: string }
-export interface DocumentationMeta {
-  id: number; release_id: number; name: string;
-  content_type: string; is_draft: boolean; created_at: string;
-}
 export interface JiraIssue {
   id: number; release_id: number; issue_key: string;
-  issue_type: string; summary: string; status: string; synced_at: string;
+  issue_type: string; summary: string; status: string;
+  // The issue's page in the tracker's web UI; empty for issues cached before
+  // the URL was recorded (they get one on the next sync).
+  url: string;
+  synced_at: string;
+}
+// One issue read live from the tracker. Fields the active tracker does not
+// carry come back empty (GitHub has no priority, an unassigned issue no assignee).
+export interface IssueDetail {
+  key: string; type: string; summary: string; status: string; url: string;
+  description: string; assignee: string; reporter: string; priority: string;
+  labels: string[]; created_at: string; updated_at: string;
 }
 // Supported document types are admin-managed (configured on the Configuration
 // page); fetch the live set via listDocumentTypes rather than hardcoding them.
 export interface DocumentType { id: number; name: string; created_at: string }
 
+export type DocumentStatus = "DRAFT" | "APPROVED";
 export interface DocumentMeta {
-  id: number; release_id: number; title: string; doc_type: string; created_at: string;
+  id: number; release_id: number; title: string; doc_type: string;
+  status: DocumentStatus; created_at: string;
   version_count: number;
   latest_version_id: number | null;
   latest_version: number | null;
   latest_filename: string | null;
   latest_content_type: string | null;
   latest_size: number | null;
+  latest_pdf_size: number | null;
   latest_uploaded_by: string | null;
   updated_at: string | null;
 }
 export interface DocumentVersionMeta {
   id: number; document_id: number; version: number; filename: string;
-  content_type: string; size: number; uploaded_by: string | null; created_at: string;
+  content_type: string; size: number; pdf_size: number;
+  uploaded_by: string | null; created_at: string;
 }
 
 // --- Workflow (state graph + per-transition RBAC) --------------------------
@@ -100,27 +110,14 @@ export interface WorkflowStateInput { name: string; transitions: WorkflowTransit
 export interface WorkflowUpdate { states: WorkflowStateInput[] }
 
 // --- Release status summary ------------------------------------------------
-export interface RequiredDoc { label: string; present: boolean }
 export interface ReleaseStatusSummary {
   release_id: number;
   state: string;
   open_bug_count: number;
   open_bugs: JiraIssue[];
-  required_docs: RequiredDoc[];
-  missing_docs: string[];
   present_doc_types: string[];
-  pending_checks: number;
-  total_checks: number;
   is_ready: boolean;
 }
-
-// --- Checks ----------------------------------------------------------------
-export type Phase = "pre" | "post";
-export interface Check {
-  id: number; release_id: number; label: string;
-  phase: Phase; done: boolean; created_at: string;
-}
-export interface CheckTemplate { id: number; label: string; phase: Phase; created_at: string }
 
 // --- Runtime configuration -------------------------------------------------
 export interface JiraConfigView { enabled: boolean; base_url: string; token_set: boolean }
@@ -137,12 +134,15 @@ export interface LLMConfigView {
 }
 export interface ConfigView {
   tracker_provider: "jira" | "github";
+  // Scheduled issue sync interval in minutes (0 = disabled). Default: 10.
+  sync_interval_minutes: number;
   jira: JiraConfigView;
   github: GitHubConfigView;
   llm: LLMConfigView;
 }
 export interface ConfigUpdate {
   tracker_provider?: "jira" | "github";
+  sync_interval_minutes?: number;
   jira_enabled?: boolean; jira_base_url?: string; jira_token?: string;
   github_enabled?: boolean; github_base_url?: string; github_token?: string;
   llm_provider?: "claude" | "ollama";
@@ -154,7 +154,7 @@ export interface ConfigUpdate {
 export interface AuditEntry {
   id: number; entity_type: string; entity_id: number; action: string;
   old_value: string | null; new_value: string | null;
-  operator: string | null; created_at: string;
+  operator: string | null; note: string | null; created_at: string;
 }
 
 export async function login(username: string, password: string): Promise<string> {
@@ -184,22 +184,14 @@ export const createRelease = (product_id: number, version: string) =>
   api.post<Release>("/api/v1/release", { product_id, version }).then((r) => r.data);
 export const deleteRelease = (releaseId: number) =>
   api.delete(`/api/v1/release/${releaseId}`).then((r) => r.data);
-export const transitionRelease = (releaseId: number, transition: string) =>
-  api.post<Release>(`/api/v1/release/${releaseId}/transition`, { transition }).then((r) => r.data);
+export const transitionRelease = (releaseId: number, transition: string, note = "") =>
+  api
+    .post<Release>(`/api/v1/release/${releaseId}/transition`, { transition, note })
+    .then((r) => r.data);
 export const getReleaseStatus = (releaseId: number) =>
   api.get<ReleaseStatusSummary>(`/api/v1/release/${releaseId}/status`).then((r) => r.data);
 export const getReleaseHistory = (releaseId: number) =>
   api.get<AuditEntry[]>(`/api/v1/release/${releaseId}/history`).then((r) => r.data);
-
-// --- Per-release checks ----------------------------------------------------
-export const listChecks = (releaseId: number) =>
-  api.get<Check[]>(`/api/v1/release/${releaseId}/checks`).then((r) => r.data);
-export const addCheck = (releaseId: number, label: string, phase: Phase) =>
-  api.post<Check>(`/api/v1/release/${releaseId}/checks`, { label, phase }).then((r) => r.data);
-export const setCheckDone = (checkId: number, done: boolean) =>
-  api.patch<Check>(`/api/v1/release/checks/${checkId}`, { done }).then((r) => r.data);
-export const deleteCheck = (checkId: number) =>
-  api.delete(`/api/v1/release/checks/${checkId}`).then((r) => r.data);
 
 // --- Workflow --------------------------------------------------------------
 export const getWorkflow = () =>
@@ -217,7 +209,7 @@ export const exportWorkflowYaml = () =>
 export const ROLES = ["Developer", "QA Manager", "Release Manager", "Administrator"];
 
 // Readiness guards a transition may require (mirrors backend KNOWN_GUARDS).
-export const GUARDS = ["no_open_issues", "docs_complete", "checks_done"];
+export const GUARDS = ["no_open_issues"];
 
 export interface TransitionRoleUpdate { state: string; transition: string; roles: string[] }
 export const setTransitionRoles = (overrides: TransitionRoleUpdate[]) =>
@@ -228,13 +220,6 @@ export const getConfig = () =>
   api.get<ConfigView>("/api/v1/config").then((r) => r.data);
 export const updateConfig = (body: ConfigUpdate) =>
   api.put<ConfigView>("/api/v1/config", body).then((r) => r.data);
-export const listCheckTemplates = () =>
-  api.get<CheckTemplate[]>("/api/v1/config/check-templates").then((r) => r.data);
-export const addCheckTemplate = (label: string, phase: Phase) =>
-  api.post<CheckTemplate>("/api/v1/config/check-templates", { label, phase }).then((r) => r.data);
-export const deleteCheckTemplate = (id: number) =>
-  api.delete(`/api/v1/config/check-templates/${id}`).then((r) => r.data);
-
 // Supported document types (admin-managed on the Configuration page).
 export const listDocumentTypes = () =>
   api.get<DocumentType[]>("/api/v1/config/document-types").then((r) => r.data);
@@ -242,22 +227,6 @@ export const addDocumentType = (name: string) =>
   api.post<DocumentType>("/api/v1/config/document-types", { name }).then((r) => r.data);
 export const deleteDocumentType = (id: number) =>
   api.delete(`/api/v1/config/document-types/${id}`).then((r) => r.data);
-
-// --- Documentation ---------------------------------------------------------
-export const listDocumentation = (releaseId: number) =>
-  api.get<DocumentationMeta[]>(`/api/v1/release/${releaseId}/documentation`).then((r) => r.data);
-export const addDocumentation = (releaseId: number, filename: string, text: string) => {
-  // Reuses the multipart UploadFile endpoint by wrapping the text as a file.
-  const form = new FormData();
-  form.append("file", new Blob([text], { type: "text/markdown" }), filename);
-  return api
-    .post<DocumentationMeta>(`/api/v1/release/${releaseId}/documentation`, form)
-    .then((r) => r.data);
-};
-export const generateReleaseNotes = (releaseId: number) =>
-  api
-    .post<DocumentationMeta>(`/api/v1/release/${releaseId}/release-notes/generate`)
-    .then((r) => r.data);
 
 // --- Document management (versioned) ---------------------------------------
 const DOCS = (releaseId: number) => `/api/v1/release/${releaseId}/documents`;
@@ -298,22 +267,38 @@ export const uploadDocumentVersion = (releaseId: number, documentId: number, fil
 export const deleteDocument = (releaseId: number, documentId: number) =>
   api.delete(`${DOCS(releaseId)}/${documentId}`).then((r) => r.data);
 
+// Approve a document (or return it to draft).
+export const setDocumentStatus = (
+  releaseId: number,
+  documentId: number,
+  status: DocumentStatus
+) =>
+  api
+    .patch<DocumentMeta>(`${DOCS(releaseId)}/${documentId}/status`, { status })
+    .then((r) => r.data);
+
+// Swap a filename's extension to .pdf for the rendered-PDF download.
+const asPdfName = (filename: string) =>
+  filename.includes(".") ? filename.replace(/\.[^.]+$/, ".pdf") : `${filename}.pdf`;
+
 // Download a specific version. The endpoint is Bearer-protected, so we fetch it
 // as a blob via axios (which attaches the token) and trigger a save in-browser.
+// `format: "pdf"` fetches the rendered-PDF companion (Markdown documents only).
 export async function downloadDocumentVersion(
   releaseId: number,
   documentId: number,
   versionId: number,
-  filename: string
+  filename: string,
+  format?: "pdf"
 ) {
   const { data } = await api.get(
     `${DOCS(releaseId)}/${documentId}/versions/${versionId}/content`,
-    { responseType: "blob" }
+    { responseType: "blob", params: format ? { format } : undefined }
   );
   const url = URL.createObjectURL(data as Blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = filename;
+  link.download = format === "pdf" ? asPdfName(filename) : filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -327,6 +312,17 @@ export const syncJira = (
   releaseId: number,
   filter: { release_label?: string; jql?: string; milestone?: string }
 ) => api.post<JiraIssue[]>(`/api/v1/release/${releaseId}/jira/sync`, filter).then((r) => r.data);
+// Full detail for one issue, fetched from the tracker on demand (not cached).
+export const getIssueDetail = (releaseId: number, key: string) =>
+  api
+    .get<IssueDetail>(`/api/v1/release/${releaseId}/jira/issue`, { params: { key } })
+    .then((r) => r.data);
+
+// Total bugs in a release, counted live from the active tracker by the release
+// label v<major>.<minor>.<patch> (e.g. v0.0.1).
+export interface ReleaseBugCount { release_id: number; label: string; total_bugs: number }
+export const getReleaseBugCount = (releaseId: number) =>
+  api.get<ReleaseBugCount>(`/api/v1/release/${releaseId}/bugs/count`).then((r) => r.data);
 
 // Saved per-release tracker filter (milestone | label | jql), applied automatically.
 export interface SyncFilter { release_id: number; mode: string; value: string; updated_at: string }
@@ -335,9 +331,37 @@ export const getSyncFilter = (releaseId: number) =>
 export const saveSyncFilter = (releaseId: number, mode: string, value: string) =>
   api.put<SyncFilter>(`/api/v1/release/${releaseId}/sync-filter`, { mode, value }).then((r) => r.data);
 
-// --- Environments ----------------------------------------------------------
-export const listEnvironments = () =>
-  api.get<Environment[]>("/api/v1/environment").then((r) => r.data);
+// --- LLM assistant (chat) --------------------------------------------------
+export interface ChatMessage { role: "user" | "assistant"; content: string }
+export interface ChatAction { tool: string; ok: boolean; summary: string }
+export interface ChatDocumentRef {
+  release_id: number; document_id: number; version_id: number | null;
+  title: string; doc_type: string; status: DocumentStatus;
+  filename: string; has_pdf: boolean;
+}
+export interface ChatResponse {
+  reply: string; actions: ChatAction[]; documents: ChatDocumentRef[];
+}
+
+// Send the full conversation so far; the backend runs the agentic tool loop and
+// returns the assistant's reply plus the actions it performed. Stateless: the
+// client owns the transcript.
+export const sendChat = (messages: ChatMessage[]) =>
+  api.post<ChatResponse>("/api/v1/chat", { messages }).then((r) => r.data);
+
+// What the assistant can do — its actions (from the live tool registry) and
+// ready-to-use prompt templates for its main jobs.
+export interface AssistantAction { name: string; kind: "read" | "action"; description: string }
+export interface AssistantPrompt { key: string; title: string; description: string; prompt: string }
+export interface AssistantCapabilities { actions: AssistantAction[]; prompts: AssistantPrompt[] }
+export const getAssistantCapabilities = () =>
+  api.get<AssistantCapabilities>("/api/v1/chat/capabilities").then((r) => r.data);
+
+// Admin-editable assistant prompts. The full desired state is sent; the backend
+// stores only what differs from the built-in defaults (so an unchanged prompt
+// keeps tracking the default) and returns the resulting effective prompts.
+export const updateAssistantPrompts = (prompts: AssistantPrompt[]) =>
+  api.put<AssistantPrompt[]>("/api/v1/config/prompts", { prompts }).then((r) => r.data);
 
 // --- User management (admin only; served by the auth service) --------------
 export interface User {

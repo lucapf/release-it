@@ -1,4 +1,4 @@
-"""Runtime configuration + check-template data access — raw SQL via psycopg3."""
+"""Runtime configuration data access — raw SQL via psycopg3."""
 from __future__ import annotations
 
 import psycopg
@@ -21,28 +21,6 @@ def set_many(conn: psycopg.Connection, values: dict[str, str]) -> None:
             """,
             (key, value),
         )
-
-
-# --- check_template (global default checks) --------------------------------
-def list_check_templates(conn: psycopg.Connection) -> list[dict]:
-    return conn.execute(
-        "SELECT id, label, phase, created_at FROM check_template ORDER BY phase, id"
-    ).fetchall()
-
-
-def add_check_template(conn: psycopg.Connection, label: str, phase: str) -> dict:
-    return conn.execute(
-        """
-        INSERT INTO check_template (label, phase) VALUES (%s, %s)
-        RETURNING id, label, phase, created_at
-        """,
-        (label, phase),
-    ).fetchone()
-
-
-def delete_check_template(conn: psycopg.Connection, template_id: int) -> bool:
-    cur = conn.execute("DELETE FROM check_template WHERE id = %s", (template_id,))
-    return cur.rowcount > 0
 
 
 # --- document_type (admin-managed supported document types) -----------------

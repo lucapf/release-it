@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -8,36 +8,40 @@ import {
   Badge,
   Button,
   Card,
-  Checkbox,
   Collapse,
   FileButton,
   Group,
   Loader,
+  Menu,
+  Modal,
   SegmentedControl,
   Select,
-  SimpleGrid,
   Skeleton,
   Stack,
   Table,
   Tabs,
   Text,
   TextInput,
-  Textarea,
   Title,
   Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
-  IconChecklist,
+  IconBug,
+  IconCheck,
   IconChevronDown,
   IconChevronRight,
   IconClipboardText,
   IconDownload,
+  IconExternalLink,
+  IconEye,
   IconFile,
   IconFiles,
   IconFileText,
+  IconFileTypePdf,
   IconHistory,
   IconListDetails,
+  IconMarkdown,
   IconRocket,
   IconTrash,
   IconUpload,
@@ -46,38 +50,32 @@ import {
 import {
   getProduct,
   getConfig,
+  getReleaseBugCount,
   listReleases,
   createRelease,
-  listDocumentation,
-  addDocumentation,
-  generateReleaseNotes,
   listDocuments,
   uploadDocument,
   listDocumentVersions,
   uploadDocumentVersion,
   deleteDocument,
   downloadDocumentVersion,
+  setDocumentStatus,
   listDocumentTypes,
   DocumentMeta,
-  DocumentVersionMeta,
   listJiraIssues,
+  getIssueDetail,
   syncJira,
   getSyncFilter,
   saveSyncFilter,
   getReleaseHistory,
-  listChecks,
-  addCheck,
-  setCheckDone,
-  deleteCheck,
   Product,
   Release,
   AuditEntry,
-  Phase,
 } from "../api/client";
 import { ReleaseStatusCard } from "../components/ReleaseStatusCard";
 import { EmptyState } from "../components/EmptyState";
 import { useAuth } from "../auth/AuthContext";
-import { notifyApiError } from "../lib/errors";
+import { apiErrorMessage, notifyApiError } from "../lib/errors";
 import { issueStatusColor } from "../lib/status";
 import {
   ReleaseKind,
@@ -128,6 +126,46 @@ function ReleaseSelector({
   );
 }
 
+// --- Total bugs in the viewed release (live from the active tracker) --------
+// The tracker is filtered by the release label "v<major>.<minor>.<patch>"
+// (e.g. v0.0.1) derived from the release version.
+function ReleaseBugTotal({ releaseId }: { releaseId: number }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["bug-count", releaseId],
+    queryFn: () => getReleaseBugCount(releaseId),
+    retry: false,
+  });
+
+  if (isLoading) {
+    return (
+      <Group gap={6}>
+        <Loader size="xs" />
+        <Text size="sm" c="dimmed">Counting bugs in the tracker…</Text>
+      </Group>
+    );
+  }
+  if (error || !data) {
+    return (
+      <Tooltip label={(error as any)?.response?.data?.detail ?? "Could not query the tracker"}>
+        <Badge variant="light" color="gray" leftSection={<IconBug size={12} />}>
+          Total bugs: —
+        </Badge>
+      </Tooltip>
+    );
+  }
+  return (
+    <Tooltip label={`Tracker issues labelled "${data.label}" with type bug`}>
+      <Badge
+        variant="light"
+        color={data.total_bugs > 0 ? "red" : "teal"}
+        leftSection={<IconBug size={12} />}
+      >
+        Total bugs in {data.label}: {data.total_bugs}
+      </Badge>
+    </Tooltip>
+  );
+}
+
 // --- New release control (lives alongside the release selector) ------------
 function NewReleaseControl({ productId }: { productId: number }) {
   const qc = useQueryClient();
@@ -159,92 +197,6 @@ function NewReleaseControl({ productId }: { productId: number }) {
   );
 }
 
-// --- Documentation tab -----------------------------------------------------
-function DocumentationTab({ releaseId }: { releaseId: number }) {
-  const qc = useQueryClient();
-  const { hasRole } = useAuth();
-  const canEdit = hasRole("Developer", "Release Manager", "Administrator");
-  const key = ["documentation", releaseId];
-  const { data: docs = [] } = useQuery({ queryKey: key, queryFn: () => listDocumentation(releaseId) });
-  const [filename, setFilename] = useState("release-notes.md");
-  const [text, setText] = useState("");
-
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: key });
-    qc.invalidateQueries({ queryKey: ["status", releaseId] });
-  };
-  const add = useMutation({
-    mutationFn: () => addDocumentation(releaseId, filename || "document.md", text),
-    onSuccess: () => {
-      setText("");
-      invalidate();
-      notifications.show({ message: "Documentation added", color: "teal" });
-    },
-    onError: (e: any) => notifyApiError(e, "Upload failed"),
-  });
-  const generate = useMutation({
-    mutationFn: () => generateReleaseNotes(releaseId),
-    onSuccess: () => {
-      invalidate();
-      notifications.show({ message: "Draft release notes generated from Jira issues", color: "teal" });
-    },
-  });
-
-  return (
-    <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
-      <Card withBorder padding="md">
-        <Group justify="space-between" mb="sm">
-          <Title order={5}>Documents</Title>
-          {canEdit && (
-            <Button size="compact-sm" variant="light" loading={generate.isPending} onClick={() => generate.mutate()}>
-              Generate from Jira
-            </Button>
-          )}
-        </Group>
-        {docs.length === 0 ? (
-          <Text c="dimmed" size="sm">No documentation yet.</Text>
-        ) : (
-          <Stack gap="xs">
-            {docs.map((d) => (
-              <Group key={d.id} justify="space-between" wrap="nowrap">
-                <Group gap={6} wrap="nowrap">
-                  <IconFileText size={16} stroke={1.6} color="var(--mantine-color-dimmed)" />
-                  <Text size="sm">{d.name}</Text>
-                </Group>
-                {d.is_draft ? <Badge size="sm" color="yellow" variant="light">draft</Badge> : <Badge size="sm" color="teal" variant="light">final</Badge>}
-              </Group>
-            ))}
-          </Stack>
-        )}
-      </Card>
-
-      {canEdit && (
-        <Card withBorder padding="md">
-          <Title order={5} mb="sm">Add documentation</Title>
-          <Stack gap="sm">
-            <TextInput
-              label="File name"
-              value={filename}
-              onChange={(e) => setFilename(e.currentTarget.value)}
-            />
-            <Textarea
-              label="Content (Markdown)"
-              autosize
-              minRows={6}
-              value={text}
-              onChange={(e) => setText(e.currentTarget.value)}
-              placeholder="# Release notes&#10;..."
-            />
-            <Button disabled={!text} loading={add.isPending} onClick={() => add.mutate()}>
-              Save document
-            </Button>
-          </Stack>
-        </Card>
-      )}
-    </SimpleGrid>
-  );
-}
-
 // --- Documents tab (uploaded files with version history) -------------------
 function formatBytes(n: number | null | undefined): string {
   if (!n) return "—";
@@ -258,15 +210,86 @@ function formatBytes(n: number | null | undefined): string {
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+// A document's approval status. Documents start as DRAFT (including anything the
+// assistant generates) and an operator promotes them to APPROVED.
+function DocStatusBadge({ status }: { status: DocumentMeta["status"] }) {
+  const approved = status === "APPROVED";
+  return (
+    <Badge
+      size="sm"
+      variant={approved ? "filled" : "light"}
+      color={approved ? "teal" : "gray"}
+      leftSection={approved ? <IconCheck size={11} /> : undefined}
+    >
+      {approved ? "Approved" : "Draft"}
+    </Badge>
+  );
+}
+
+// Download control for a document version: a menu offering Markdown (to edit)
+// and, when a rendered PDF companion exists, PDF (to read). Falls back to a
+// single download button for documents that have no PDF (non-Markdown uploads).
+function DownloadMenu({
+  releaseId,
+  documentId,
+  versionId,
+  filename,
+  hasPdf,
+  ariaLabel,
+}: {
+  releaseId: number;
+  documentId: number;
+  versionId: number;
+  filename: string;
+  hasPdf: boolean;
+  ariaLabel: string;
+}) {
+  const dl = useMutation({
+    mutationFn: (format?: "pdf") =>
+      downloadDocumentVersion(releaseId, documentId, versionId, filename, format),
+    onError: (e: any) => notifyApiError(e, "Download failed"),
+  });
+
+  if (!hasPdf) {
+    return (
+      <Tooltip label="Download">
+        <ActionIcon
+          variant="subtle"
+          aria-label={ariaLabel}
+          loading={dl.isPending}
+          onClick={() => dl.mutate(undefined)}
+        >
+          <IconDownload size={18} />
+        </ActionIcon>
+      </Tooltip>
+    );
+  }
+  return (
+    <Menu shadow="md" position="bottom-end" withinPortal>
+      <Menu.Target>
+        <Tooltip label="Download">
+          <ActionIcon variant="subtle" aria-label={ariaLabel} loading={dl.isPending}>
+            <IconDownload size={18} />
+          </ActionIcon>
+        </Tooltip>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Label>Download</Menu.Label>
+        <Menu.Item leftSection={<IconMarkdown size={16} />} onClick={() => dl.mutate(undefined)}>
+          Markdown (.md) — to edit
+        </Menu.Item>
+        <Menu.Item leftSection={<IconFileTypePdf size={16} />} onClick={() => dl.mutate("pdf")}>
+          PDF (.pdf) — to read
+        </Menu.Item>
+      </Menu.Dropdown>
+    </Menu>
+  );
+}
+
 function VersionHistory({ releaseId, documentId }: { releaseId: number; documentId: number }) {
   const { data: versions = [], isLoading } = useQuery({
     queryKey: ["doc-versions", documentId],
     queryFn: () => listDocumentVersions(releaseId, documentId),
-  });
-  const dl = useMutation({
-    mutationFn: (v: DocumentVersionMeta) =>
-      downloadDocumentVersion(releaseId, documentId, v.id, v.filename),
-    onError: (e: any) => notifyApiError(e, "Download failed"),
   });
 
   if (isLoading) return <Group justify="center" py="sm"><Loader size="sm" /></Group>;
@@ -298,16 +321,14 @@ function VersionHistory({ releaseId, documentId }: { releaseId: number; document
               <Table.Td>{new Date(v.created_at).toLocaleString()}</Table.Td>
               <Table.Td>{v.uploaded_by || "—"}</Table.Td>
               <Table.Td>
-                <Tooltip label="Download this version">
-                  <ActionIcon
-                    variant="subtle"
-                    aria-label={`Download version ${v.version}`}
-                    loading={dl.isPending && dl.variables?.id === v.id}
-                    onClick={() => dl.mutate(v)}
-                  >
-                    <IconDownload size={16} />
-                  </ActionIcon>
-                </Tooltip>
+                <DownloadMenu
+                  releaseId={releaseId}
+                  documentId={documentId}
+                  versionId={v.id}
+                  filename={v.filename}
+                  hasPdf={v.pdf_size > 0}
+                  ariaLabel={`Download version ${v.version}`}
+                />
               </Table.Td>
             </Table.Tr>
           ))}
@@ -336,6 +357,10 @@ function DocumentsTab({ releaseId }: { releaseId: number }) {
   const [docType, setDocType] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
+  // A new-version upload is staged per document: picking a file selects it (and
+  // re-picking replaces the selection); nothing is sent until the operator hits
+  // the Upload button. Only one document can have a staged file at a time.
+  const [pendingVersion, setPendingVersion] = useState<{ docId: number; file: File } | null>(null);
 
   const invalidate = (docId?: number) => {
     qc.invalidateQueries({ queryKey: key });
@@ -359,6 +384,7 @@ function DocumentsTab({ releaseId }: { releaseId: number }) {
     mutationFn: ({ docId, f }: { docId: number; f: File }) =>
       uploadDocumentVersion(releaseId, docId, f),
     onSuccess: (_d, vars) => {
+      setPendingVersion(null);
       invalidate(vars.docId);
       notifications.show({ message: "New version uploaded", color: "teal" });
     },
@@ -374,12 +400,14 @@ function DocumentsTab({ releaseId }: { releaseId: number }) {
     onError: (e: any) => notifyApiError(e, "Delete failed"),
   });
 
-  const downloadLatest = (d: DocumentMeta) => {
-    if (d.latest_version_id == null) return;
-    downloadDocumentVersion(releaseId, d.id, d.latest_version_id, d.latest_filename || d.title).catch(
-      (e) => notifyApiError(e, "Download failed")
-    );
-  };
+  const approve = useMutation({
+    mutationFn: (docId: number) => setDocumentStatus(releaseId, docId, "APPROVED"),
+    onSuccess: () => {
+      invalidate();
+      notifications.show({ message: "Document approved", color: "teal" });
+    },
+    onError: (e: any) => notifyApiError(e, "Could not approve document"),
+  });
 
   if (isLoading) return <Group justify="center" py="xl"><Loader /></Group>;
 
@@ -461,6 +489,7 @@ function DocumentsTab({ releaseId }: { releaseId: number }) {
                       <Group gap={6} wrap="nowrap">
                         <Text fw={600} truncate>{d.title}</Text>
                         <Badge size="sm" variant="light" color="grape">{d.doc_type}</Badge>
+                        <DocStatusBadge status={d.status} />
                       </Group>
                       <Text size="xs" c="dimmed">
                         {d.latest_filename} · {formatBytes(d.latest_size)} ·{" "}
@@ -470,24 +499,36 @@ function DocumentsTab({ releaseId }: { releaseId: number }) {
                   </Group>
                   <Group gap={6} wrap="nowrap">
                     <Badge variant="light">v{d.latest_version ?? 1}</Badge>
-                    <Tooltip label="Download latest version">
-                      <ActionIcon
-                        variant="subtle"
-                        aria-label="Download latest"
-                        onClick={() => downloadLatest(d)}
+                    {canEdit && d.status !== "APPROVED" && (
+                      <Button
+                        size="compact-sm"
+                        variant="light"
+                        color="teal"
+                        leftSection={<IconCheck size={14} />}
+                        loading={approve.isPending && approve.variables === d.id}
+                        onClick={() => approve.mutate(d.id)}
                       >
-                        <IconDownload size={18} />
-                      </ActionIcon>
-                    </Tooltip>
+                        Approve
+                      </Button>
+                    )}
+                    {d.latest_version_id != null && (
+                      <DownloadMenu
+                        releaseId={releaseId}
+                        documentId={d.id}
+                        versionId={d.latest_version_id}
+                        filename={d.latest_filename || `${d.title}.md`}
+                        hasPdf={(d.latest_pdf_size ?? 0) > 0}
+                        ariaLabel="Download latest"
+                      />
+                    )}
                     {canEdit && (
-                      <FileButton onChange={(f) => f && newVersion.mutate({ docId: d.id, f })}>
+                      <FileButton onChange={(f) => f && setPendingVersion({ docId: d.id, file: f })}>
                         {(props) => (
-                          <Tooltip label="Upload new version">
+                          <Tooltip label="Select a new version">
                             <ActionIcon
                               {...props}
                               variant="subtle"
-                              aria-label="Upload new version"
-                              loading={newVersion.isPending && newVersion.variables?.docId === d.id}
+                              aria-label="Select a new version"
                             >
                               <IconUpload size={18} />
                             </ActionIcon>
@@ -519,6 +560,38 @@ function DocumentsTab({ releaseId }: { releaseId: number }) {
                     )}
                   </Group>
                 </Group>
+                {canEdit && pendingVersion?.docId === d.id && (
+                  <Group align="center" gap="sm" mt="sm" wrap="nowrap">
+                    <Text size="sm" style={{ flex: 1, minWidth: 0 }} truncate>
+                      New version: {pendingVersion.file.name} ({formatBytes(pendingVersion.file.size)})
+                    </Text>
+                    <FileButton
+                      onChange={(f) => f && setPendingVersion({ docId: d.id, file: f })}
+                    >
+                      {(props) => (
+                        <Button {...props} size="compact-sm" variant="light" leftSection={<IconFile size={14} />}>
+                          Change file
+                        </Button>
+                      )}
+                    </FileButton>
+                    <Button
+                      size="compact-sm"
+                      leftSection={<IconUpload size={14} />}
+                      loading={newVersion.isPending && newVersion.variables?.docId === d.id}
+                      onClick={() => newVersion.mutate({ docId: d.id, f: pendingVersion.file })}
+                    >
+                      Upload
+                    </Button>
+                    <Button
+                      size="compact-sm"
+                      variant="subtle"
+                      color="gray"
+                      onClick={() => setPendingVersion(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </Group>
+                )}
                 <Collapse in={open}>
                   <Stack gap={0} mt="sm">
                     {open && <VersionHistory releaseId={releaseId} documentId={d.id} />}
@@ -537,6 +610,108 @@ function DocumentsTab({ releaseId }: { releaseId: number }) {
 // One day, in ms — releases not yet Approved go "stale" once their last sync
 // is older than this and the date is highlighted.
 const STALE_MS = 24 * 60 * 60 * 1000;
+
+/** A labelled line in the detail modal; renders nothing when the tracker has
+ *  no value for the field (GitHub has no priority, issues may be unassigned). */
+function DetailRow({ label, children }: { label: string; children: ReactNode }) {
+  if (!children) return null;
+  return (
+    <Group gap="xs" wrap="nowrap" align="baseline">
+      <Text size="sm" c="dimmed" w={90} style={{ flexShrink: 0 }}>
+        {label}
+      </Text>
+      <Text size="sm">{children}</Text>
+    </Group>
+  );
+}
+
+const formatIssueDate = (raw: string) => (raw ? new Date(raw).toLocaleString() : "");
+
+/** The issue's current state, read from the tracker when the operator asks for
+ *  it — not from the synced cache, which only holds the columns the table shows. */
+function IssueDetailModal({
+  releaseId,
+  issueKey,
+  trackerName,
+  onClose,
+}: {
+  releaseId: number;
+  issueKey: string | null;
+  trackerName: string;
+  onClose: () => void;
+}) {
+  const { data: issue, isPending, error } = useQuery({
+    queryKey: ["issue-detail", releaseId, issueKey],
+    queryFn: () => getIssueDetail(releaseId, issueKey!),
+    enabled: !!issueKey,
+    // A deleted issue (404) or an unreachable tracker (502) won't fix itself
+    // within a retry window — report it instead of stalling behind backoff.
+    retry: false,
+  });
+
+  return (
+    <Modal opened={!!issueKey} onClose={onClose} title={issueKey ?? "Issue"} size="lg">
+      {error ? (
+        <Alert color="red" variant="light">
+          {apiErrorMessage(error, `Could not load ${issueKey} from ${trackerName}`)}
+        </Alert>
+      ) : isPending || !issue ? (
+        <Stack gap="xs">
+          <Skeleton height={20} width="60%" />
+          <Skeleton height={14} />
+          <Skeleton height={14} width="80%" />
+        </Stack>
+      ) : (
+        <Stack gap="md">
+          <div>
+            <Title order={5}>{issue.summary}</Title>
+            <Group gap="xs" mt="xs">
+              <Badge size="sm" variant="light" color="gray">{issue.type}</Badge>
+              <Badge size="sm" variant="light" color={issueStatusColor(issue.status)}>
+                {issue.status}
+              </Badge>
+              {issue.labels.map((l) => (
+                <Badge key={l} size="sm" variant="outline" color="gray">{l}</Badge>
+              ))}
+            </Group>
+          </div>
+
+          <Stack gap={4}>
+            <DetailRow label="Assignee">{issue.assignee}</DetailRow>
+            <DetailRow label="Reporter">{issue.reporter}</DetailRow>
+            <DetailRow label="Priority">{issue.priority}</DetailRow>
+            <DetailRow label="Created">{formatIssueDate(issue.created_at)}</DetailRow>
+            <DetailRow label="Updated">{formatIssueDate(issue.updated_at)}</DetailRow>
+          </Stack>
+
+          <div>
+            <Text size="sm" c="dimmed" mb={4}>Description</Text>
+            {issue.description ? (
+              <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>{issue.description}</Text>
+            ) : (
+              <Text size="sm" c="dimmed" fs="italic">No description.</Text>
+            )}
+          </div>
+
+          {issue.url && (
+            <Group justify="flex-end">
+              <Button
+                component="a"
+                href={issue.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                variant="light"
+                leftSection={<IconExternalLink size={16} />}
+              >
+                Open in {trackerName}
+              </Button>
+            </Group>
+          )}
+        </Stack>
+      )}
+    </Modal>
+  );
+}
 
 function JiraTab({
   releaseId,
@@ -569,6 +744,8 @@ function JiraTab({
   const [milestone, setMilestone] = useState("");
   const [label, setLabel] = useState("");
   const [jql, setJql] = useState("");
+  // The issue whose details are open, if any (its detail is fetched on demand).
+  const [detailKey, setDetailKey] = useState<string | null>(null);
 
   // A saved filter is applied automatically once it (and the tracker) load.
   useEffect(() => {
@@ -736,6 +913,7 @@ function JiraTab({
                 <Table.Th>Type</Table.Th>
                 <Table.Th>Summary</Table.Th>
                 <Table.Th>Status</Table.Th>
+                <Table.Th />
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
@@ -747,98 +925,57 @@ function JiraTab({
                   <Table.Td>
                     <Badge size="sm" variant="light" color={issueStatusColor(i.status)}>{i.status}</Badge>
                   </Table.Td>
+                  <Table.Td>
+                    <Group gap={4} justify="flex-end" wrap="nowrap">
+                      <Tooltip label="View details">
+                        <ActionIcon
+                          variant="subtle"
+                          color="gray"
+                          aria-label={`View details of ${i.issue_key}`}
+                          onClick={() => setDetailKey(i.issue_key)}
+                        >
+                          <IconEye size={16} />
+                        </ActionIcon>
+                      </Tooltip>
+                      {/* Issues cached before the URL was recorded have none until
+                          the next sync — `data-disabled` keeps the tooltip working,
+                          which a truly disabled control would swallow. */}
+                      {i.url ? (
+                        <Tooltip label={`Open in ${trackerName}`}>
+                          <ActionIcon
+                            variant="subtle"
+                            color="gray"
+                            component="a"
+                            href={i.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            aria-label={`Open ${i.issue_key} in ${trackerName}`}
+                          >
+                            <IconExternalLink size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                      ) : (
+                        <Tooltip label={`Re-sync to link this issue to ${trackerName}`}>
+                          <ActionIcon variant="subtle" color="gray" data-disabled onClick={(e) => e.preventDefault()}>
+                            <IconExternalLink size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                      )}
+                    </Group>
+                  </Table.Td>
                 </Table.Tr>
               ))}
             </Table.Tbody>
           </Table>
         </Table.ScrollContainer>
       )}
-    </Stack>
-  );
-}
 
-// --- Checks tab ------------------------------------------------------------
-function ChecksTab({ releaseId }: { releaseId: number }) {
-  const qc = useQueryClient();
-  const { hasRole } = useAuth();
-  const canEdit = hasRole("Release Manager", "Administrator");
-  const key = ["checks", releaseId];
-  const { data: checks = [], isLoading } = useQuery({ queryKey: key, queryFn: () => listChecks(releaseId) });
-  const [label, setLabel] = useState("");
-  const [phase, setPhase] = useState<Phase>("pre");
-
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: key });
-    qc.invalidateQueries({ queryKey: ["status", releaseId] });
-  };
-  const add = useMutation({
-    mutationFn: () => addCheck(releaseId, label, phase),
-    onSuccess: () => { setLabel(""); invalidate(); },
-    onError: (e: any) => notifyApiError(e, "Could not add check"),
-  });
-  const toggle = useMutation({
-    mutationFn: ({ id, done }: { id: number; done: boolean }) => setCheckDone(id, done),
-    onSuccess: invalidate,
-  });
-  const remove = useMutation({ mutationFn: (id: number) => deleteCheck(id), onSuccess: invalidate });
-
-  if (isLoading) return <Group justify="center" py="xl"><Loader /></Group>;
-
-  const groups: Phase[] = ["pre", "post"];
-  return (
-    <Stack gap="md">
-      {groups.map((g) => {
-        const items = checks.filter((c) => c.phase === g);
-        return (
-          <Card key={g} withBorder radius="md" padding="md">
-            <Title order={5} mb="xs" tt="capitalize">{g}-installation checks</Title>
-            {items.length === 0 ? (
-              <Text c="dimmed" size="sm">No {g} checks.</Text>
-            ) : (
-              <Stack gap={6}>
-                {items.map((c) => (
-                  <Group key={c.id} justify="space-between">
-                    <Checkbox
-                      label={c.label}
-                      checked={c.done}
-                      disabled={!canEdit || toggle.isPending}
-                      onChange={(e) => toggle.mutate({ id: c.id, done: e.currentTarget.checked })}
-                    />
-                    {canEdit && (
-                      <ActionIcon variant="subtle" color="red" aria-label="Delete" onClick={() => remove.mutate(c.id)}>
-                        <IconTrash size={16} />
-                      </ActionIcon>
-                    )}
-                  </Group>
-                ))}
-              </Stack>
-            )}
-          </Card>
-        );
-      })}
-
-      {canEdit && (
-        <Card withBorder radius="md" padding="md">
-          <Group align="flex-end" gap="sm">
-            <Select
-              label="Phase"
-              data={[{ value: "pre", label: "pre" }, { value: "post", label: "post" }]}
-              value={phase}
-              onChange={(v) => setPhase((v as Phase) ?? "pre")}
-              maw={120}
-              allowDeselect={false}
-            />
-            <TextInput
-              label="New check"
-              placeholder="e.g. Backup taken"
-              value={label}
-              onChange={(e) => setLabel(e.currentTarget.value)}
-              style={{ flex: 1 }}
-            />
-            <Button disabled={!label} loading={add.isPending} onClick={() => add.mutate()}>Add check</Button>
-          </Group>
-        </Card>
-      )}
+      <IssueDetailModal
+        releaseId={releaseId}
+        issueKey={detailKey}
+        trackerName={trackerName}
+        onClose={() => setDetailKey(null)}
+      />
     </Stack>
   );
 }
@@ -879,13 +1016,14 @@ function HistoryTab({ releaseId }: { releaseId: number }) {
   }
 
   return (
-    <Table.ScrollContainer minWidth={520}>
+    <Table.ScrollContainer minWidth={640}>
       <Table verticalSpacing="sm" highlightOnHover>
         <Table.Thead>
           <Table.Tr>
             <Table.Th>When</Table.Th>
             <Table.Th>Step</Table.Th>
             <Table.Th>Change</Table.Th>
+            <Table.Th>Note</Table.Th>
             <Table.Th>By</Table.Th>
           </Table.Tr>
         </Table.Thead>
@@ -899,6 +1037,9 @@ function HistoryTab({ releaseId }: { releaseId: number }) {
                 <Badge variant="light" color="gray">{ACTION_LABEL[e.action] ?? e.action}</Badge>
               </Table.Td>
               <Table.Td><Text size="sm">{describeChange(e)}</Text></Table.Td>
+              <Table.Td>
+                <Text size="sm" c={e.note ? undefined : "dimmed"}>{e.note || "—"}</Text>
+              </Table.Td>
               <Table.Td><Text size="sm">{e.operator || "—"}</Text></Table.Td>
             </Table.Tr>
           ))}
@@ -987,12 +1128,15 @@ export function ProductDetailPage() {
         <Card withBorder radius="md" padding="md">
           <Stack gap="md">
             {activeRelease ? (
-              <ReleaseSelector
-                releases={releases}
-                byKind={byKind}
-                value={activeId}
-                onChange={setSelected}
-              />
+              <>
+                <ReleaseSelector
+                  releases={releases}
+                  byKind={byKind}
+                  value={activeId}
+                  onChange={setSelected}
+                />
+                <ReleaseBugTotal releaseId={activeRelease.id} />
+              </>
             ) : (
               <Text c="dimmed" size="sm">
                 No releases yet. Add the first release to begin tracking it through the workflow.
@@ -1006,8 +1150,6 @@ export function ProductDetailPage() {
       <Tabs defaultValue="overview" keepMounted={false}>
         <Tabs.List>
           <Tabs.Tab value="overview" leftSection={<IconClipboardText size={16} />}>Overview</Tabs.Tab>
-          <Tabs.Tab value="checks" leftSection={<IconChecklist size={16} />}>Checks</Tabs.Tab>
-          <Tabs.Tab value="documentation" leftSection={<IconFile size={16} />}>Documentation</Tabs.Tab>
           <Tabs.Tab value="documents" leftSection={<IconFiles size={16} />}>Documents</Tabs.Tab>
           <Tabs.Tab value="issues" leftSection={<IconListDetails size={16} />}>Issues</Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<IconHistory size={16} />}>History</Tabs.Tab>
@@ -1017,14 +1159,6 @@ export function ProductDetailPage() {
           {activeRelease ? (
             <ReleaseStatusCard release={activeRelease} />
           ) : needsRelease("see its status")}
-        </Tabs.Panel>
-
-        <Tabs.Panel value="checks" pt="md">
-          {activeId ? <ChecksTab releaseId={activeId} /> : needsRelease("manage checks")}
-        </Tabs.Panel>
-
-        <Tabs.Panel value="documentation" pt="md">
-          {activeId ? <DocumentationTab releaseId={activeId} /> : needsRelease("attach documentation")}
         </Tabs.Panel>
 
         <Tabs.Panel value="documents" pt="md">

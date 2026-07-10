@@ -5,6 +5,14 @@
 # is pinned to its schema, so the services' (unqualified) SQL and migrations
 # land in — and only see — their own schema. No application SQL changes needed.
 image: postgres:16-alpine
+
+# Persistent storage for the database.
+#   enabled: true  -> a StatefulSet PVC of `storage` size (survives restarts).
+#   enabled: false -> an ephemeral emptyDir: no PV/PVC is created, the DB starts
+#                     clean on every install and teardown is instant. Used by the
+#                     e2e suite (--set releaseit-db.persistence.enabled=false).
+persistence:
+  enabled: true
 storage: 1Gi
 
 # Superuser — used only for bootstrap (initdb). The services never use it.

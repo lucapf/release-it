@@ -11,18 +11,19 @@ import psycopg
 # Document row joined with its latest version, plus a version count. Used for the
 # release's document list (one entry per document, showing its current version).
 _DOC_LIST_SQL = """
-    SELECT d.id, d.release_id, d.title, d.doc_type, d.created_at,
+    SELECT d.id, d.release_id, d.title, d.doc_type, d.status, d.created_at,
            v.id           AS latest_version_id,
            v.version      AS latest_version,
            v.filename     AS latest_filename,
            v.content_type AS latest_content_type,
            v.size         AS latest_size,
+           v.pdf_size     AS latest_pdf_size,
            v.uploaded_by  AS latest_uploaded_by,
            v.created_at   AS updated_at,
            (SELECT count(*) FROM document_version WHERE document_id = d.id) AS version_count
     FROM document d
     LEFT JOIN LATERAL (
-        SELECT id, version, filename, content_type, size, uploaded_by, created_at
+        SELECT id, version, filename, content_type, size, pdf_size, uploaded_by, created_at
         FROM document_version
         WHERE document_id = d.id
         ORDER BY version DESC
@@ -48,7 +49,7 @@ def create_document(
 
 def get_document(conn: psycopg.Connection, document_id: int) -> dict | None:
     return conn.execute(
-        "SELECT id, release_id, title, created_at FROM document WHERE id = %s",
+        "SELECT id, release_id, title, doc_type, status, created_at FROM document WHERE id = %s",
         (document_id,),
     ).fetchone()
 
@@ -93,29 +94,52 @@ def add_version(
     content_type: str,
     content: bytes,
     uploaded_by: str | None,
+    pdf_content: bytes | None = None,
 ) -> dict:
     """Append a new version to a document. The version number is the next
-    integer after the document's current highest (1 for the first upload)."""
+    integer after the document's current highest (1 for the first upload).
+
+    ``pdf_content`` is the rendered-PDF companion (for Markdown sources); when
+    absent the version keeps only its original bytes. Adding a version returns
+    the document to DRAFT — the content it may have been approved on has changed
+    and needs re-approval."""
     next_version = conn.execute(
         "SELECT COALESCE(MAX(version), 0) + 1 AS v FROM document_version WHERE document_id = %s",
         (document_id,),
     ).fetchone()["v"]
-    return conn.execute(
+    row = conn.execute(
         """
         INSERT INTO document_version
-            (document_id, version, filename, content_type, content, size, uploaded_by)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        RETURNING id, document_id, version, filename, content_type, size, uploaded_by, created_at
+            (document_id, version, filename, content_type, content, size,
+             pdf_content, pdf_size, uploaded_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id, document_id, version, filename, content_type, size,
+                  pdf_size, uploaded_by, created_at
         """,
-        (document_id, next_version, filename, content_type, content, len(content), uploaded_by),
+        (document_id, next_version, filename, content_type, content, len(content),
+         pdf_content, len(pdf_content) if pdf_content else 0, uploaded_by),
     ).fetchone()
+    conn.execute("UPDATE document SET status = 'DRAFT' WHERE id = %s", (document_id,))
+    return row
+
+
+def set_status(conn: psycopg.Connection, document_id: int, status: str) -> dict | None:
+    """Set a document's approval status (DRAFT/APPROVED) and return its metadata."""
+    updated = conn.execute(
+        "UPDATE document SET status = %s WHERE id = %s RETURNING id",
+        (status, document_id),
+    ).fetchone()
+    if updated is None:
+        return None
+    return get_document_meta(conn, document_id)
 
 
 def list_versions(conn: psycopg.Connection, document_id: int) -> list[dict]:
     """All versions of a document, newest first."""
     return conn.execute(
         """
-        SELECT id, document_id, version, filename, content_type, size, uploaded_by, created_at
+        SELECT id, document_id, version, filename, content_type, size, pdf_size,
+               uploaded_by, created_at
         FROM document_version
         WHERE document_id = %s
         ORDER BY version DESC
@@ -125,10 +149,12 @@ def list_versions(conn: psycopg.Connection, document_id: int) -> list[dict]:
 
 
 def get_version_content(conn: psycopg.Connection, version_id: int) -> dict | None:
-    """Fetch a single version's bytes for download."""
+    """Fetch a single version's bytes for download, including its rendered-PDF
+    companion (``pdf_content``) when one exists."""
     return conn.execute(
         """
-        SELECT dv.id, dv.document_id, dv.filename, dv.content_type, dv.content
+        SELECT dv.id, dv.document_id, dv.filename, dv.content_type, dv.content,
+               dv.pdf_content, dv.pdf_size
         FROM document_version dv
         WHERE dv.id = %s
         """,

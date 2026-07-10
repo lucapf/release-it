@@ -6,8 +6,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-Phase = Literal["pre", "post"]
-
 
 # --- Product ---------------------------------------------------------------
 class ProductCreate(BaseModel):
@@ -65,42 +63,11 @@ class ProductOverview(BaseModel):
 
 class TransitionRequest(BaseModel):
     transition: str = Field(..., description="Name of the transition to apply, e.g. 'Approve'")
+    note: str = Field("", description="Optional free-text comment explaining the state change")
 
 
 class InheritRequest(BaseModel):
     version: str = Field(..., description="Version for the new inherited release")
-
-
-# --- Check -----------------------------------------------------------------
-class CheckCreate(BaseModel):
-    label: str
-    phase: Phase
-
-
-class Check(BaseModel):
-    id: int
-    release_id: int
-    label: str
-    phase: Phase
-    done: bool
-    created_at: datetime
-
-
-class CheckUpdate(BaseModel):
-    done: bool
-
-
-# --- Environment -----------------------------------------------------------
-class EnvironmentCreate(BaseModel):
-    name: str
-    description: str = ""
-
-
-class Environment(BaseModel):
-    id: int
-    name: str
-    description: str
-    created_at: datetime
 
 
 # --- Artifact / Documentation (metadata only; content streamed separately) -
@@ -109,15 +76,6 @@ class ArtifactMeta(BaseModel):
     release_id: int
     name: str
     content_type: str
-    created_at: datetime
-
-
-class DocumentationMeta(BaseModel):
-    id: int
-    release_id: int
-    name: str
-    content_type: str
-    is_draft: bool
     created_at: datetime
 
 
@@ -144,6 +102,7 @@ class DocumentVersionMeta(BaseModel):
     filename: str
     content_type: str
     size: int
+    pdf_size: int = 0  # bytes of the rendered-PDF companion (0 when there is none)
     uploaded_by: str | None = None
     created_at: datetime
 
@@ -154,6 +113,7 @@ class DocumentMeta(BaseModel):
     release_id: int
     title: str
     doc_type: str
+    status: str = "DRAFT"  # DRAFT until an operator approves it
     created_at: datetime
     version_count: int = 0
     latest_version_id: int | None = None
@@ -161,8 +121,14 @@ class DocumentMeta(BaseModel):
     latest_filename: str | None = None
     latest_content_type: str | None = None
     latest_size: int | None = None
+    latest_pdf_size: int | None = None  # >0 when a downloadable PDF companion exists
     latest_uploaded_by: str | None = None
     updated_at: datetime | None = None
+
+
+class DocumentStatusUpdate(BaseModel):
+    """Approve (or return to draft) a document."""
+    status: Literal["DRAFT", "APPROVED"]
 
 
 # --- Issue-tracker sync ----------------------------------------------------
@@ -187,7 +153,28 @@ class JiraIssue(BaseModel):
     issue_type: str
     summary: str
     status: str
+    # The issue's page in the tracker's web UI. Empty for issues cached before
+    # the URL was recorded — they get one on the next sync.
+    url: str = ""
     synced_at: datetime
+
+
+class IssueDetail(BaseModel):
+    """One issue fetched live from the tracker, for the on-demand detail view.
+    Fields a given tracker does not carry come back empty (GitHub has no
+    priority; an unassigned issue has no assignee)."""
+    key: str
+    type: str
+    summary: str
+    status: str
+    url: str = ""
+    description: str = ""
+    assignee: str = ""
+    reporter: str = ""
+    priority: str = ""
+    labels: list[str] = Field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
 
 
 class SyncFilter(BaseModel):
@@ -237,6 +224,8 @@ class LLMConfigView(BaseModel):
 class ConfigView(BaseModel):
     """Current configuration as shown on the configuration page (no secrets)."""
     tracker_provider: str = "jira"
+    # Scheduled issue sync interval, in minutes (0 = disabled). Default: 10.
+    sync_interval_minutes: int = 10
     jira: JiraConfigView = JiraConfigView()
     github: GitHubConfigView = GitHubConfigView()
     llm: LLMConfigView = LLMConfigView()
@@ -246,6 +235,9 @@ class ConfigUpdate(BaseModel):
     """Configuration update. A token/key left as None/empty is kept unchanged,
     so secrets are write-only — they are never echoed back by the API."""
     tracker_provider: Literal["jira", "github"] | None = None
+    sync_interval_minutes: int | None = Field(
+        default=None, ge=0, description="Scheduled issue sync interval in minutes (0 disables)"
+    )
     jira_enabled: bool | None = None
     jira_base_url: str | None = None
     jira_token: str | None = None
@@ -260,25 +252,12 @@ class ConfigUpdate(BaseModel):
     ollama_model: str | None = None
 
 
-# --- Check templates (global default checks) -------------------------------
-class CheckTemplateCreate(BaseModel):
-    label: str
-    phase: Phase
-
-
-class CheckTemplate(BaseModel):
-    id: int
-    label: str
-    phase: Phase
-    created_at: datetime
-
-
 # --- Workflow (state machine exposure) -------------------------------------
 class WorkflowTransition(BaseModel):
     name: str
     target: str
     roles: list[str] = []  # roles permitted to perform this transition
-    requires: list[str] = []  # readiness guards (e.g. no_open_issues, docs_complete)
+    requires: list[str] = []  # readiness guards (e.g. no_open_issues, document:<type>)
 
 
 class WorkflowState(BaseModel):
@@ -325,25 +304,101 @@ class TransitionRolesUpdate(BaseModel):
 
 
 # --- Release status summary ------------------------------------------------
-class RequiredDoc(BaseModel):
-    label: str
-    present: bool
-
-
 class ReleaseStatusSummary(BaseModel):
     """Aggregated readiness view for a single release."""
     release_id: int
     state: str
     open_bug_count: int = 0
     open_bugs: list[JiraIssue] = []
-    required_docs: list[RequiredDoc] = []
-    missing_docs: list[str] = []
     # Document types currently uploaded on the release — feeds `document:<type>`
     # workflow readiness guards.
     present_doc_types: list[str] = []
-    pending_checks: int = 0
-    total_checks: int = 0
     is_ready: bool = False
+
+
+class ReleaseBugCount(BaseModel):
+    """Total bugs in a release, counted live from the active tracker by the
+    release label ``v<major>.<minor>.<patch>`` (e.g. ``v0.0.1``)."""
+    release_id: int
+    label: str
+    total_bugs: int
+
+
+# --- LLM assistant (chat) --------------------------------------------------
+class ChatMessage(BaseModel):
+    """One turn of the operator/assistant conversation. The client sends the full
+    transcript each request; the server is stateless between calls."""
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(..., min_length=1)
+
+
+class ChatAction(BaseModel):
+    """A tool the assistant invoked while answering — surfaced so the operator can
+    see what was read or changed on their behalf."""
+    tool: str
+    ok: bool
+    summary: str
+
+
+class ChatDocumentRef(BaseModel):
+    """A document the assistant surfaced for the operator to download — the chat
+    UI renders authenticated Markdown/PDF download buttons from it."""
+    release_id: int
+    document_id: int
+    version_id: int | None = None
+    title: str
+    doc_type: str
+    status: str
+    filename: str
+    has_pdf: bool = False
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    actions: list[ChatAction] = []
+    documents: list[ChatDocumentRef] = []
+
+
+class AssistantAction(BaseModel):
+    """One capability of the assistant, described from its live tool registry.
+    ``kind`` is "read" for inspection tools and "action" for tools that change
+    the system."""
+    name: str
+    kind: Literal["read", "action"]
+    description: str
+
+
+class AssistantPrompt(BaseModel):
+    """A ready-to-use prompt template for a common assistant task."""
+    key: str
+    title: str
+    description: str
+    prompt: str
+
+
+class AssistantCapabilities(BaseModel):
+    actions: list[AssistantAction] = []
+    prompts: list[AssistantPrompt] = []
+
+
+class AssistantPromptUpdate(BaseModel):
+    """One prompt in an admin's edit. ``key`` selects a built-in template; the
+    text fields carry the desired content. A field equal to the built-in default
+    (or blank) stores no override, so the prompt keeps tracking the default."""
+    key: str
+    title: str | None = None
+    description: str | None = None
+    prompt: str | None = None
+
+
+class AssistantPromptsUpdate(BaseModel):
+    """Full desired state of the editable prompts. Prompts omitted here are reset
+    to their built-in defaults."""
+    prompts: list[AssistantPromptUpdate] = []
 
 
 # --- Audit -----------------------------------------------------------------
@@ -355,4 +410,5 @@ class AuditEntry(BaseModel):
     old_value: str | None
     new_value: str | None
     operator: str | None
+    note: str | None = None
     created_at: datetime

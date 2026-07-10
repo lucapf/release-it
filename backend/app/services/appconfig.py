@@ -22,6 +22,8 @@ JIRA_TOKEN = "jira_token"
 GITHUB_ENABLED = "github_enabled"
 GITHUB_BASE_URL = "github_base_url"
 GITHUB_TOKEN = "github_token"
+# Scheduled issue sync interval, in minutes ("0" disables the scheduler).
+SYNC_INTERVAL_MINUTES = "sync_interval_minutes"
 # NOTE: the GitHub repository is configured per-product (Product.tracker_repo),
 # not as a global app_config key.
 
@@ -34,6 +36,11 @@ OLLAMA_MODEL = "ollama_model"
 # JSON map {"<state>|<transition>": ["Role", ...]} overriding the per-transition
 # roles seeded from states.yaml. Lets an admin redefine who may transition.
 TRANSITION_ROLES = "transition_roles"
+
+# JSON map {"<prompt key>": {"title"|"description"|"prompt": "..."}} overriding
+# the built-in assistant prompt templates. Only fields that differ from the
+# default are stored, so untouched prompts keep tracking the built-in defaults.
+ASSISTANT_PROMPTS = "assistant_prompts"
 
 SECRET_KEYS = {JIRA_TOKEN, GITHUB_TOKEN, CLAUDE_API_KEY}
 
@@ -68,6 +75,8 @@ class EffectiveConfig:
     jira: TrackerConfig
     github: TrackerConfig
     llm: LLMConfig
+    # Scheduled issue sync: every N minutes; 0 (or negative) disables it.
+    sync_interval_minutes: int = 10
 
 
 def effective(conn: psycopg.Connection) -> EffectiveConfig:
@@ -78,6 +87,12 @@ def effective(conn: psycopg.Connection) -> EffectiveConfig:
 
     def b(key: str, default: bool) -> bool:
         return _as_bool(db[key]) if key in db and db[key] != "" else default
+
+    def i(key: str, default: int) -> int:
+        try:
+            return int(db[key]) if key in db and db[key] != "" else default
+        except ValueError:
+            return default
 
     provider = s(TRACKER_PROVIDER, settings.tracker_provider).lower()
     if provider not in {"jira", "github"}:
@@ -102,6 +117,7 @@ def effective(conn: psycopg.Connection) -> EffectiveConfig:
             ollama_base_url=s(OLLAMA_BASE_URL, settings.ollama_base_url),
             ollama_model=s(OLLAMA_MODEL, settings.ollama_model),
         ),
+        sync_interval_minutes=i(SYNC_INTERVAL_MINUTES, settings.sync_interval_minutes),
     )
 
 
@@ -124,6 +140,26 @@ def set_transition_role_overrides(
     conn: psycopg.Connection, overrides: dict[str, list[str]]
 ) -> None:
     repo.set_many(conn, {TRANSITION_ROLES: json.dumps(overrides)})
+
+
+# --- Assistant prompt overrides --------------------------------------------
+def prompt_overrides(conn: psycopg.Connection) -> dict[str, dict]:
+    """Admin-defined overrides for the built-in assistant prompts, keyed by the
+    prompt's ``key``. Each value is a partial {title|description|prompt} map."""
+    raw = repo.get_all(conn).get(ASSISTANT_PROMPTS, "")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+def set_prompt_overrides(conn: psycopg.Connection, overrides: dict[str, dict]) -> None:
+    repo.set_many(conn, {ASSISTANT_PROMPTS: json.dumps(overrides)})
 
 
 def transition_roles(conn, sm, state: str, transition_name: str) -> set[str]:

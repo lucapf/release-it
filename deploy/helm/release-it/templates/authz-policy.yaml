@@ -1,0 +1,13 @@
+# Shared authorization policy for ReleaseIT — common to the services.
+#
+# Consumed by the auth service's POST /auth endpoint (mounted into the auth pod
+# as a configMap). It lives in the umbrella chart because the policy governs
+# access to every service, not just auth. Edit `authzPolicy` in the umbrella
+# values to change access rules.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: releaseit-authz-policy
+data:
+  authz-policy.yaml: |
+{{ .Values.authzPolicy | indent 4 }}
