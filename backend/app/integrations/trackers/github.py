@@ -9,7 +9,12 @@ import logging
 
 import httpx
 
-from app.integrations.trackers.base import DONE, detail
+from app.integrations.trackers.base import (
+    DONE,
+    TrackerProjectNotFound,
+    TrackerUnreachable,
+    detail,
+)
 from app.services.appconfig import TrackerConfig
 
 log = logging.getLogger("releaseit.tracker.github")
@@ -57,6 +62,23 @@ class GitHubTracker:
             if (m.get("title") or "").strip().lower() == wanted:
                 return m.get("number")
         return None
+
+    def verify_project(self, repo: str) -> None:
+        """Confirm the GitHub repository ``owner/repo`` exists via the repos API."""
+        slug = (repo or "").strip()
+        if not slug:
+            return
+        try:
+            resp = httpx.get(
+                f"{self._cfg.base_url}/repos/{slug}",
+                headers=self._headers(),
+                timeout=30,
+            )
+            if resp.status_code == 404:
+                raise TrackerProjectNotFound(slug)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise TrackerUnreachable(str(exc)) from exc
 
     def fetch_issues(
         self, query: str, *, repo: str = "", filter_kind: str = ""

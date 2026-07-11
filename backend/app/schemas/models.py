@@ -86,11 +86,24 @@ class ArtifactMeta(BaseModel):
 # the configured set.
 class DocumentTypeCreate(BaseModel):
     name: str
+    # 'manual' documents are uploaded by an operator; 'generated' ones are built
+    # by the system from ``generation_prompt``.
+    kind: Literal["manual", "generated"] = "manual"
+    generation_prompt: str = ""
+
+
+class DocumentTypeUpdate(BaseModel):
+    """Editable document-type fields. Only the supplied fields change."""
+    name: str | None = None
+    kind: Literal["manual", "generated"] | None = None
+    generation_prompt: str | None = None
 
 
 class DocumentType(BaseModel):
     id: int
     name: str
+    kind: str = "manual"
+    generation_prompt: str = ""
     created_at: datetime
 
 

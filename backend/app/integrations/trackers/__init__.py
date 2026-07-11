@@ -14,14 +14,22 @@ from __future__ import annotations
 
 import re
 
-from app.integrations.trackers.base import DONE, IssueTracker
+from app.integrations.trackers.base import (
+    DONE,
+    IssueTracker,
+    TrackerError,
+    TrackerProjectNotFound,
+    TrackerUnreachable,
+)
 from app.integrations.trackers.github import GitHubTracker
 from app.integrations.trackers.jira import JiraTracker
 from app.services.appconfig import EffectiveConfig
 
 __all__ = [
     "DONE", "IssueTracker", "JiraTracker", "GitHubTracker",
-    "get_tracker", "fetch_issues", "fetch_issue", "release_label", "count_bugs",
+    "TrackerError", "TrackerProjectNotFound", "TrackerUnreachable",
+    "get_tracker", "fetch_issues", "fetch_issue", "verify_project",
+    "release_label", "count_bugs",
 ]
 
 _SEMVER = re.compile(r"(\d+)\.(\d+)\.(\d+)")
@@ -60,3 +68,9 @@ def fetch_issues(
 def fetch_issue(cfg: EffectiveConfig, key: str, *, repo: str = "") -> dict | None:
     """Fetch one issue in full from the active tracker, or None when it is gone."""
     return get_tracker(cfg).fetch_issue(key, repo=repo)
+
+
+def verify_project(cfg: EffectiveConfig, repo: str) -> None:
+    """Confirm ``repo`` exists on the active tracker. Raises
+    :class:`TrackerProjectNotFound` or :class:`TrackerUnreachable` otherwise."""
+    get_tracker(cfg).verify_project(repo)

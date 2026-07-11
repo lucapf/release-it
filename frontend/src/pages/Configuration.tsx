@@ -22,6 +22,7 @@ import {
   Switch,
   Table,
   Text,
+  Textarea,
   TextInput,
   Title,
   Tooltip,
@@ -47,8 +48,10 @@ import {
   exportWorkflowYaml,
   listDocumentTypes,
   addDocumentType,
+  updateDocumentType,
   deleteDocumentType,
   DocumentType,
+  DocumentTypeKind,
   getOverview,
   updateProduct,
   deleteProduct,
@@ -606,36 +609,151 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
 }
 
 // --- Document types: admin-managed supported document types ----------------
+// A manual/generated selector plus the conditional generation-prompt editor,
+// shared by the "add" form and the edit modal so both validate identically.
+function DocTypeKindFields({
+  kind,
+  setKind,
+  prompt,
+  setPrompt,
+}: {
+  kind: DocumentTypeKind;
+  setKind: (k: DocumentTypeKind) => void;
+  prompt: string;
+  setPrompt: (p: string) => void;
+}) {
+  return (
+    <>
+      <div>
+        <Text size="sm" fw={500} mb={4}>How is this document produced?</Text>
+        <SegmentedControl
+          value={kind}
+          onChange={(v) => setKind(v as DocumentTypeKind)}
+          data={[
+            { label: "Manual", value: "manual" },
+            { label: "Generated", value: "generated" },
+          ]}
+        />
+        <Text size="xs" c="dimmed" mt={4}>
+          {kind === "generated"
+            ? "The system builds this document from the prompt below."
+            : "An operator uploads this document by hand."}
+        </Text>
+      </div>
+      {kind === "generated" && (
+        <Textarea
+          label="Generation prompt"
+          description="Describe how this document must be built"
+          placeholder="e.g. Summarise the release's closed issues grouped by type, with a section per component…"
+          autosize
+          minRows={4}
+          value={prompt}
+          onChange={(e) => setPrompt(e.currentTarget.value)}
+        />
+      )}
+    </>
+  );
+}
+
+function EditDocumentTypeModal({
+  docType,
+  onClose,
+}: {
+  docType: DocumentType | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState<DocumentTypeKind>("manual");
+  const [prompt, setPrompt] = useState("");
+  useEffect(() => {
+    if (docType) {
+      setName(docType.name);
+      setKind(docType.kind);
+      setPrompt(docType.generation_prompt);
+    }
+  }, [docType]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      updateDocumentType(docType!.id, {
+        name: name.trim(),
+        kind,
+        generation_prompt: kind === "generated" ? prompt : "",
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["document-types"] });
+      notifications.show({ message: "Document type updated", color: "teal" });
+      onClose();
+    },
+    onError: (e: any) => notifyApiError(e, "Could not update document type"),
+  });
+
+  const invalid = !name.trim() || (kind === "generated" && !prompt.trim());
+
+  return (
+    <Modal opened={!!docType} onClose={onClose} title="Edit document type" size="lg">
+      <Stack gap="md">
+        <TextInput
+          label="Name"
+          data-autofocus
+          value={name}
+          onChange={(e) => setName(e.currentTarget.value)}
+        />
+        <DocTypeKindFields kind={kind} setKind={setKind} prompt={prompt} setPrompt={setPrompt} />
+        <Group justify="flex-end">
+          <Button variant="default" onClick={onClose}>Cancel</Button>
+          <Button disabled={invalid} loading={save.isPending} onClick={() => save.mutate()}>
+            Save changes
+          </Button>
+        </Group>
+      </Stack>
+    </Modal>
+  );
+}
+
 function DocumentTypesSection({ canEdit }: { canEdit: boolean }) {
   const qc = useQueryClient();
   const key = ["document-types"];
   const { data: types = [], isLoading } = useQuery({ queryKey: key, queryFn: listDocumentTypes });
   const [name, setName] = useState("");
+  const [kind, setKind] = useState<DocumentTypeKind>("manual");
+  const [prompt, setPrompt] = useState("");
+  const [editing, setEditing] = useState<DocumentType | null>(null);
   const invalidate = () => qc.invalidateQueries({ queryKey: key });
 
   const add = useMutation({
-    mutationFn: () => addDocumentType(name.trim()),
-    onSuccess: () => { setName(""); invalidate(); notifications.show({ message: "Document type added", color: "teal" }); },
+    mutationFn: () =>
+      addDocumentType(name.trim(), kind, kind === "generated" ? prompt : ""),
+    onSuccess: () => {
+      setName("");
+      setKind("manual");
+      setPrompt("");
+      invalidate();
+      notifications.show({ message: "Document type added", color: "teal" });
+    },
     onError: (e: any) => notifyApiError(e, "Could not add document type"),
   });
   const remove = useMutation({
     mutationFn: (id: number) => deleteDocumentType(id),
     onSuccess: (_d, id) => {
       // Drop the deleted type from the cache immediately so the list updates
-      // without waiting on a refetch (and the badge can't be clicked twice),
-      // then reconcile with the server.
+      // without waiting on a refetch, then reconcile with the server.
       qc.setQueryData<DocumentType[]>(key, (old) => old?.filter((t) => t.id !== id));
       invalidate();
     },
     onError: (e: any) => notifyApiError(e, "Could not delete document type"),
   });
 
+  const addInvalid = !name.trim() || (kind === "generated" && !prompt.trim());
+
   return (
     <Card withBorder radius="md" padding="lg">
       <Title order={4} mb={4}>Document types</Title>
       <Text c="dimmed" size="sm" mb="md">
-        The supported types operators can mark uploaded documents with. Removing a
-        type leaves already-classified documents untouched.
+        The supported types operators can mark documents with. A <b>manual</b> type is
+        uploaded by hand; a <b>generated</b> type is built by the system from its
+        generation prompt. Removing a type leaves already-classified documents untouched.
       </Text>
 
       {isLoading ? (
@@ -643,51 +761,81 @@ function DocumentTypesSection({ canEdit }: { canEdit: boolean }) {
       ) : types.length === 0 ? (
         <Text c="dimmed" size="sm" mb="md">No document types configured.</Text>
       ) : (
-        <Group gap="xs" mb="md" wrap="wrap">
-          {types.map((t) => (
-            <Badge
-              key={t.id}
-              size="lg"
-              variant="light"
-              color="grape"
-              pr={canEdit ? 3 : undefined}
-              rightSection={
-                canEdit ? (
-                  <ActionIcon
-                    size="xs"
-                    color="grape"
-                    variant="transparent"
-                    aria-label={`Delete ${t.name}`}
-                    loading={remove.isPending && remove.variables === t.id}
-                    disabled={remove.isPending}
-                    onClick={() => remove.mutate(t.id)}
-                  >
-                    <IconTrash size={12} />
-                  </ActionIcon>
-                ) : undefined
-              }
-            >
-              {t.name}
-            </Badge>
-          ))}
-        </Group>
+        <Table.ScrollContainer minWidth={520}>
+          <Table verticalSpacing="sm" highlightOnHover mb="md">
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Type</Table.Th>
+                <Table.Th w={120}>Produced</Table.Th>
+                <Table.Th>Generation prompt</Table.Th>
+                {canEdit && <Table.Th w={90} />}
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {types.map((t) => (
+                <Table.Tr key={t.id}>
+                  <Table.Td fw={600}>{t.name}</Table.Td>
+                  <Table.Td>
+                    <Badge
+                      variant="light"
+                      color={t.kind === "generated" ? "grape" : "gray"}
+                      style={{ textTransform: "none" }}
+                    >
+                      {t.kind === "generated" ? "Generated" : "Manual"}
+                    </Badge>
+                  </Table.Td>
+                  <Table.Td>
+                    {t.kind === "generated" ? (
+                      <Text size="sm" c="dimmed" lineClamp={2}>{t.generation_prompt}</Text>
+                    ) : (
+                      <Text size="sm" c="dimmed">—</Text>
+                    )}
+                  </Table.Td>
+                  {canEdit && (
+                    <Table.Td>
+                      <Group gap={4} wrap="nowrap" justify="flex-end">
+                        <Tooltip label="Edit document type" withArrow>
+                          <ActionIcon variant="subtle" color="gray" aria-label={`Edit ${t.name}`}
+                            onClick={() => setEditing(t)}>
+                            <IconPencil size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label="Delete document type" withArrow>
+                          <ActionIcon variant="subtle" color="red" aria-label={`Delete ${t.name}`}
+                            loading={remove.isPending && remove.variables === t.id}
+                            disabled={remove.isPending}
+                            onClick={() => remove.mutate(t.id)}>
+                            <IconTrash size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
+                    </Table.Td>
+                  )}
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       )}
 
       {canEdit && (
-        <Group align="flex-end" gap="sm">
+        <Stack gap="sm">
           <TextInput
             label="New type"
             placeholder="e.g. Security Review"
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) add.mutate(); }}
-            style={{ flex: 1 }}
           />
-          <Button disabled={!name.trim()} loading={add.isPending} onClick={() => add.mutate()}>
-            Add type
-          </Button>
-        </Group>
+          <DocTypeKindFields kind={kind} setKind={setKind} prompt={prompt} setPrompt={setPrompt} />
+          <Group justify="flex-end">
+            <Button disabled={addInvalid} loading={add.isPending} onClick={() => add.mutate()}>
+              Add type
+            </Button>
+          </Group>
+        </Stack>
       )}
+
+      <EditDocumentTypeModal docType={editing} onClose={() => setEditing(null)} />
     </Card>
   );
 }

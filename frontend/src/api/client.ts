@@ -74,7 +74,14 @@ export interface IssueDetail {
 }
 // Supported document types are admin-managed (configured on the Configuration
 // page); fetch the live set via listDocumentTypes rather than hardcoding them.
-export interface DocumentType { id: number; name: string; created_at: string }
+export type DocumentTypeKind = "manual" | "generated";
+export interface DocumentType {
+  id: number;
+  name: string;
+  kind: DocumentTypeKind;
+  generation_prompt: string;
+  created_at: string;
+}
 
 export type DocumentStatus = "DRAFT" | "APPROVED";
 export interface DocumentMeta {
@@ -223,8 +230,19 @@ export const updateConfig = (body: ConfigUpdate) =>
 // Supported document types (admin-managed on the Configuration page).
 export const listDocumentTypes = () =>
   api.get<DocumentType[]>("/api/v1/config/document-types").then((r) => r.data);
-export const addDocumentType = (name: string) =>
-  api.post<DocumentType>("/api/v1/config/document-types", { name }).then((r) => r.data);
+export const addDocumentType = (
+  name: string,
+  kind: DocumentTypeKind = "manual",
+  generation_prompt = ""
+) =>
+  api
+    .post<DocumentType>("/api/v1/config/document-types", { name, kind, generation_prompt })
+    .then((r) => r.data);
+export const updateDocumentType = (
+  id: number,
+  patch: { name?: string; kind?: DocumentTypeKind; generation_prompt?: string }
+) =>
+  api.patch<DocumentType>(`/api/v1/config/document-types/${id}`, patch).then((r) => r.data);
 export const deleteDocumentType = (id: number) =>
   api.delete(`/api/v1/config/document-types/${id}`).then((r) => r.data);
 

@@ -42,6 +42,19 @@ def detail(**known) -> dict:
     return out
 
 
+# --- Errors raised when validating a tracker project binding ----------------
+class TrackerError(Exception):
+    """Base class for tracker connectivity/validation failures."""
+
+
+class TrackerProjectNotFound(TrackerError):
+    """The named project/repository does not exist on the tracker."""
+
+
+class TrackerUnreachable(TrackerError):
+    """The tracker could not be reached (bad URL/credentials, network error)."""
+
+
 class IssueTracker(Protocol):
     """Fetches the issues contained in a release from an external tracker.
 
@@ -61,4 +74,11 @@ class IssueTracker(Protocol):
         """One issue in full, or None when it does not exist or the tracker is
         not configured. ``key`` is the normalized key ``fetch_issues`` stored
         (Jira: ``"REL-1"``; GitHub: ``"#12"``)."""
+        ...
+
+    def verify_project(self, repo: str) -> None:
+        """Confirm ``repo`` (Jira project key, GitHub ``"owner/repo"``) exists on
+        the tracker. Returns normally when it does; raises
+        :class:`TrackerProjectNotFound` when it does not, or
+        :class:`TrackerUnreachable` when the tracker cannot be reached."""
         ...

@@ -6,6 +6,8 @@ from psycopg import errors as pg_errors
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.db.pool import get_conn
+from app.integrations import trackers
+from app.integrations.trackers import TrackerProjectNotFound, TrackerUnreachable
 from app.repositories import products as repo
 from app.repositories import releases as releases_repo
 from app.schemas.models import (
@@ -15,8 +17,34 @@ from app.schemas.models import (
     ProductUpdate,
     Release,
 )
+from app.services import appconfig
 
 router = APIRouter()
+
+
+def _verify_tracker_project(conn: psycopg.Connection, tracker_repo: str | None) -> None:
+    """Confirm the issue-tracker project bound to a product actually exists,
+    rejecting the save with a clear message when it does not or the tracker is
+    unreachable. Skipped when no project is set or no tracker is enabled/configured
+    (there is nothing to check against)."""
+    repo_val = (tracker_repo or "").strip()
+    if not repo_val:
+        return
+    cfg = appconfig.effective(conn)
+    active = cfg.github if cfg.provider == "github" else cfg.jira
+    if not (active.enabled and active.base_url):
+        return  # no enabled/configured tracker to verify against
+    label = "GitHub repository" if cfg.provider == "github" else "Jira project"
+    try:
+        trackers.verify_project(cfg, repo_val)
+    except TrackerProjectNotFound as exc:
+        raise HTTPException(
+            400, f'The {label} "{repo_val}" was not found on the configured tracker.'
+        ) from exc
+    except TrackerUnreachable as exc:
+        raise HTTPException(
+            502, f'Could not reach the tracker to verify "{repo_val}": {exc}'
+        ) from exc
 
 
 @router.get("", response_model=list[Product])
@@ -33,6 +61,7 @@ def products_overview(conn: psycopg.Connection = Depends(get_conn)):
 
 @router.post("", response_model=Product, status_code=201)
 def create_product(body: ProductCreate, conn: psycopg.Connection = Depends(get_conn)):
+    _verify_tracker_project(conn, body.tracker_repo)
     return repo.create(conn, body.name, body.solution_id, body.tracker_repo)
 
 
@@ -57,6 +86,8 @@ def update_product(
     if name is not None and not name:
         raise HTTPException(422, "Product name cannot be empty")
     tracker_repo = body.tracker_repo.strip() if body.tracker_repo is not None else None
+    if tracker_repo is not None:
+        _verify_tracker_project(conn, tracker_repo)
 
     try:
         return repo.update(conn, product_id, name=name, tracker_repo=tracker_repo)

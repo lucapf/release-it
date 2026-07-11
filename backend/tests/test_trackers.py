@@ -7,9 +7,15 @@ from __future__ import annotations
 
 import pytest
 
+import httpx
+
 import app.integrations.trackers.github as github_mod
 import app.integrations.trackers.jira as jira_mod
 from app.integrations.trackers import DONE, count_bugs, release_label
+from app.integrations.trackers.base import (
+    TrackerProjectNotFound,
+    TrackerUnreachable,
+)
 from app.integrations.trackers.github import GitHubTracker
 from app.integrations.trackers.jira import JiraTracker
 from app.services.appconfig import TrackerConfig
@@ -255,3 +261,68 @@ def test_count_bugs_matches_normalized_type_case_insensitively():
     ]
     assert count_bugs(issues) == 2
     assert count_bugs([]) == 0
+
+
+# --- verify_project: confirm a bound tracker project actually exists ---------
+def test_jira_verify_project_hits_project_api_and_accepts_existing(monkeypatch):
+    captured = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        captured["url"] = url
+        return _Resp({"key": "REL", "name": "ReleaseIT"})
+
+    monkeypatch.setattr(jira_mod.httpx, "get", fake_get)
+    tracker = JiraTracker(TrackerConfig(True, "https://jira.example.com", "t0ken"))
+    tracker.verify_project("REL")  # exists → returns without raising
+    assert captured["url"] == "https://jira.example.com/rest/api/2/project/REL"
+
+
+def test_jira_verify_project_raises_not_found_on_404(monkeypatch):
+    monkeypatch.setattr(
+        jira_mod.httpx, "get", lambda *a, **k: _Resp({}, status_code=404)
+    )
+    tracker = JiraTracker(TrackerConfig(True, "https://jira.example.com", "t"))
+    with pytest.raises(TrackerProjectNotFound):
+        tracker.verify_project("NOPE")
+
+
+def test_jira_verify_project_raises_unreachable_on_network_error(monkeypatch):
+    def boom(*a, **k):
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(jira_mod.httpx, "get", boom)
+    tracker = JiraTracker(TrackerConfig(True, "https://jira.invalid", "t"))
+    with pytest.raises(TrackerUnreachable):
+        tracker.verify_project("REL")
+
+
+def test_github_verify_project_hits_repos_api_and_accepts_existing(monkeypatch):
+    captured = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        captured["url"] = url
+        return _Resp({"full_name": "acme/app"})
+
+    monkeypatch.setattr(github_mod.httpx, "get", fake_get)
+    tracker = GitHubTracker(TrackerConfig(True, "https://api.github.com", "t0ken"))
+    tracker.verify_project("acme/app")
+    assert captured["url"] == "https://api.github.com/repos/acme/app"
+
+
+def test_github_verify_project_raises_not_found_on_404(monkeypatch):
+    monkeypatch.setattr(
+        github_mod.httpx, "get", lambda *a, **k: _Resp({}, status_code=404)
+    )
+    tracker = GitHubTracker(TrackerConfig(True, "https://api.github.com", "t"))
+    with pytest.raises(TrackerProjectNotFound):
+        tracker.verify_project("acme/does-not-exist")
+
+
+def test_github_verify_project_raises_unreachable_on_network_error(monkeypatch):
+    def boom(*a, **k):
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(github_mod.httpx, "get", boom)
+    tracker = GitHubTracker(TrackerConfig(True, "https://api.github.invalid", "t"))
+    with pytest.raises(TrackerUnreachable):
+        tracker.verify_project("acme/app")

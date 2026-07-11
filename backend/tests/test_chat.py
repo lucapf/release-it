@@ -177,12 +177,16 @@ def test_describe_actions_covers_every_tool_and_flags_writes():
 
 def test_prompt_templates_cover_the_three_assistant_jobs():
     prompts = {p["key"]: p for p in assistant.PROMPT_TEMPLATES}
-    assert set(prompts) == {"release_notes", "release_status", "advance_workflow"}
+    assert set(prompts) == {"generate_document", "release_status", "advance_workflow"}
     for p in prompts.values():
         assert p["title"] and p["description"] and p["prompt"]
-    # The release-notes prompt asks to process the issues AND upload the result.
-    assert "upload" in prompts["release_notes"]["prompt"].lower()
-    assert "issue" in prompts["release_notes"]["prompt"].lower()
+    # The generate-document job is generic: it verifies the type, then uploads.
+    gen = prompts["generate_document"]["prompt"].lower()
+    assert "upload" in gen
+    assert "document type" in gen
+    # It gates on the type being supported and automatic before generating.
+    assert "get_generation_prompt" in prompts["generate_document"]["prompt"]
+    assert "manual" in gen
     # The workflow prompt drives the configured workflow.
     assert "workflow" in prompts["advance_workflow"]["prompt"].lower()
 
@@ -201,7 +205,7 @@ def test_job_playbook_lists_jobs_and_teaches_matching_and_narration():
 
 def test_job_playbook_tracks_admin_overrides():
     playbook = assistant.render_job_playbook(
-        assistant.effective_prompts({"release_notes": {"title": "Craft the notes"}})
+        assistant.effective_prompts({"generate_document": {"title": "Craft the notes"}})
     )
     assert "Craft the notes" in playbook
 
@@ -226,16 +230,75 @@ def test_effective_prompts_apply_overrides_and_ignore_blanks():
 
 
 def test_prompt_override_for_only_keeps_fields_that_differ():
-    default = next(p for p in assistant.PROMPT_TEMPLATES if p["key"] == "release_notes")
+    default = next(p for p in assistant.PROMPT_TEMPLATES if p["key"] == "generate_document")
     # A value equal to the default (or blank) stores nothing → tracks the default.
-    assert assistant.prompt_override_for("release_notes", dict(default)) == {}
-    assert assistant.prompt_override_for("release_notes", {"prompt": "   "}) == {}
+    assert assistant.prompt_override_for("generate_document", dict(default)) == {}
+    assert assistant.prompt_override_for("generate_document", {"prompt": "   "}) == {}
     # Only the changed field is retained.
     assert assistant.prompt_override_for(
-        "release_notes", {"title": "New title", "prompt": default["prompt"]}
+        "generate_document", {"title": "New title", "prompt": default["prompt"]}
     ) == {"title": "New title"}
     # An unknown key yields no override.
     assert assistant.prompt_override_for("nope", {"title": "x"}) == {}
+
+
+# --- Document generation gate (get_generation_prompt) -----------------------
+def _doc_type(name, kind, generation_prompt=""):
+    return {"name": name, "kind": kind, "generation_prompt": generation_prompt}
+
+
+def test_list_document_types_flags_generation_mode(monkeypatch):
+    monkeypatch.setattr(assistant.config_repo, "list_document_types",
+                        lambda conn: [_doc_type("Release Notes", "generated", "..."),
+                                      _doc_type("Contract", "manual")])
+    out = assistant._list_document_types(_ctx(object()), {})
+    assert out == [
+        {"name": "Contract", "generation": "manual"},
+        {"name": "Release Notes", "generation": "automatic"},
+    ]
+
+
+def test_get_generation_prompt_returns_prompt_for_automatic_type(monkeypatch):
+    monkeypatch.setattr(assistant.config_repo, "get_document_type_by_name",
+                        lambda conn, name: _doc_type("Release Notes", "generated", "Draft the notes."))
+    out = assistant._get_generation_prompt(_ctx(object()), {"doc_type": "release notes"})
+    assert out == {"doc_type": "Release Notes", "generation": "automatic",
+                   "generation_prompt": "Draft the notes."}
+
+
+def test_get_generation_prompt_errors_when_type_unsupported(monkeypatch):
+    monkeypatch.setattr(assistant.config_repo, "get_document_type_by_name",
+                        lambda conn, name: None)
+    monkeypatch.setattr(assistant.config_repo, "document_type_names",
+                        lambda conn: {"Contract"})
+    try:
+        assistant._get_generation_prompt(_ctx(object()), {"doc_type": "Foo"})
+        assert False, "expected an error for an unsupported type"
+    except release_ops.ReleaseActionError as exc:
+        assert exc.status_code == 404
+        assert "not supported" in exc.detail and "Contract" in exc.detail
+
+
+def test_get_generation_prompt_errors_when_type_is_manual(monkeypatch):
+    monkeypatch.setattr(assistant.config_repo, "get_document_type_by_name",
+                        lambda conn, name: _doc_type("Contract", "manual"))
+    try:
+        assistant._get_generation_prompt(_ctx(object()), {"doc_type": "Contract"})
+        assert False, "expected an error for a manual type"
+    except release_ops.ReleaseActionError as exc:
+        assert exc.status_code == 400
+        assert "manual generation" in exc.detail
+
+
+def test_get_generation_prompt_errors_when_automatic_type_has_no_prompt(monkeypatch):
+    monkeypatch.setattr(assistant.config_repo, "get_document_type_by_name",
+                        lambda conn, name: _doc_type("Release Notes", "generated", "   "))
+    try:
+        assistant._get_generation_prompt(_ctx(object()), {"doc_type": "Release Notes"})
+        assert False, "expected an error when no prompt is configured"
+    except release_ops.ReleaseActionError as exc:
+        assert exc.status_code == 400
+        assert "no generation prompt" in exc.detail
 
 
 def test_dispatch_unknown_tool(monkeypatch):

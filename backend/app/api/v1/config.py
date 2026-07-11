@@ -19,6 +19,7 @@ from app.schemas.models import (
     ConfigView,
     DocumentType,
     DocumentTypeCreate,
+    DocumentTypeUpdate,
     GitHubConfigView,
     JiraConfigView,
     LLMConfigView,
@@ -154,6 +155,23 @@ def set_transition_roles(
 
 
 # --- Supported document types ----------------------------------------------
+def _resolve_doc_type(name: str, kind: str, generation_prompt: str) -> tuple[str, str, str]:
+    """Validate and normalise a document type's fields. A manual type carries no
+    prompt (any supplied one is dropped); a generated type must have a non-empty
+    prompt. Returns the cleaned ``(name, kind, generation_prompt)``."""
+    name = name.strip()
+    if not name:
+        raise HTTPException(400, "Document type name must not be empty")
+    if kind == "generated":
+        prompt = generation_prompt.strip()
+        if not prompt:
+            raise HTTPException(
+                400, "A generated document type needs a generation prompt"
+            )
+        return name, "generated", prompt
+    return name, "manual", ""
+
+
 @router.get("/document-types", response_model=list[DocumentType])
 def list_document_types(conn: psycopg.Connection = Depends(get_conn)):
     return repo.list_document_types(conn)
@@ -161,12 +179,34 @@ def list_document_types(conn: psycopg.Connection = Depends(get_conn)):
 
 @router.post("/document-types", response_model=DocumentType, status_code=201)
 def add_document_type(body: DocumentTypeCreate, conn: psycopg.Connection = Depends(get_conn)):
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(400, "Document type name must not be empty")
+    name, kind, prompt = _resolve_doc_type(body.name, body.kind, body.generation_prompt)
     if name in repo.document_type_names(conn):
         raise HTTPException(409, f'A document type named "{name}" already exists')
-    return repo.add_document_type(conn, name)
+    return repo.add_document_type(conn, name, kind, prompt)
+
+
+@router.patch("/document-types/{type_id}", response_model=DocumentType)
+def update_document_type(
+    type_id: int, body: DocumentTypeUpdate, conn: psycopg.Connection = Depends(get_conn)
+):
+    """Edit a document type. Omitted fields keep their current value; switching a
+    type to 'generated' requires a prompt, switching to 'manual' clears it."""
+    existing = repo.get_document_type(conn, type_id)
+    if existing is None:
+        raise HTTPException(404, "Document type not found")
+
+    name, kind, prompt = _resolve_doc_type(
+        body.name if body.name is not None else existing["name"],
+        body.kind if body.kind is not None else existing["kind"],
+        body.generation_prompt
+        if body.generation_prompt is not None
+        else existing["generation_prompt"],
+    )
+    if name != existing["name"] and name in repo.document_type_names(conn):
+        raise HTTPException(409, f'A document type named "{name}" already exists')
+    return repo.update_document_type(
+        conn, type_id, name=name, kind=kind, generation_prompt=prompt
+    )
 
 
 @router.delete("/document-types/{type_id}", status_code=204)

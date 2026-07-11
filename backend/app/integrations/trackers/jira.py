@@ -9,7 +9,11 @@ import logging
 
 import httpx
 
-from app.integrations.trackers.base import detail
+from app.integrations.trackers.base import (
+    TrackerProjectNotFound,
+    TrackerUnreachable,
+    detail,
+)
 from app.services.appconfig import TrackerConfig
 
 log = logging.getLogger("releaseit.tracker.jira")
@@ -55,6 +59,23 @@ class JiraTracker:
         """The Jira web page for an issue — what an operator opens."""
         base = self._cfg.base_url.rstrip("/")
         return f"{base}/browse/{key}" if base and key else ""
+
+    def verify_project(self, repo: str) -> None:
+        """Confirm the Jira project key ``repo`` exists via the project API."""
+        key = (repo or "").strip()
+        if not key:
+            return
+        try:
+            resp = httpx.get(
+                f"{self._cfg.base_url}/rest/api/2/project/{key}",
+                headers=self._headers(),
+                timeout=30,
+            )
+            if resp.status_code == 404:
+                raise TrackerProjectNotFound(key)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise TrackerUnreachable(str(exc)) from exc
 
     def fetch_issues(
         self, query: str, *, repo: str = "", filter_kind: str = ""

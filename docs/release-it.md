@@ -127,16 +127,6 @@ If a release got rejected, the system allow the operator to create a new release
 Upon state change ReleaseIt supports the execution of a pipeline on one of the configured service. Standard integration is via HTTP rest api call with token authentication.
 Supported system are:
 
+- GitHub Actions
 - GitlabCI
 - Ansible (via AWX)
-
-## Implementation
-
-- Backend: FastAPI/Python
-- Frontend: React
-- Data Storage: PostgreSQL (all application data, including files, should be stored in the database using the bytea type)
-- add the following routes:
-- /api/v1/product: for the product management
-- /api/v1/release: for the release management
-- /api/v1/environment: for the crud related to the environment
-- /api/v1/user-management: user management (login, create/delete/update user, list/create/delete roles)
