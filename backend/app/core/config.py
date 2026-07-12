@@ -17,9 +17,6 @@ class Settings(BaseSettings):
     db_pool_min_size: int = 1
     db_pool_max_size: int = 10
 
-    # --- Feature flags ------------------------------------------------------
-    solution_enabled: bool = True
-
     # --- Auth (JWT resource server) -----------------------------------------
     # The backend never issues tokens; it only verifies them against the
     # configured provider's JWKS. Point these at releaseit-auth or any
@@ -42,19 +39,15 @@ class Settings(BaseSettings):
     # ``roles`` in the workflow definition. Comma-separated.
     default_transition_roles: str = "QA Manager,Release Manager,Administrator"
 
-    # --- Release readiness rules -------------------------------------------
-    # Jira issue statuses that count as "closed". Everything else is open.
-    closed_bug_statuses: str = "Done"
-
     # --- Issue tracker ------------------------------------------------------
     # Active issue tracker: "jira" or "github". These are the seed defaults;
     # the runtime configuration page (app_config table) overrides them.
+    #
+    # NOTE: there is deliberately no "which statuses count as closed" setting.
+    # The tracker owns that fact and each provider reports it (Jira's
+    # statusCategory, GitHub/GitLab's issue state); re-declaring it here would be
+    # a second, silently-diverging definition of the same thing.
     tracker_provider: str = "jira"
-
-    # How often (in minutes) the background scheduler re-syncs every running
-    # release's issues from the active tracker. 0 disables the scheduled sync.
-    # Editable at runtime on the configuration page (app_config overrides this).
-    sync_interval_minutes: int = 10
 
     # --- Integrations (optional, token auth) --------------------------------
     jira_enabled: bool = False
@@ -78,10 +71,6 @@ class Settings(BaseSettings):
     gitlab_enabled: bool = False
     gitlab_base_url: str = ""
     gitlab_token: str = ""
-
-    awx_enabled: bool = False
-    awx_base_url: str = ""
-    awx_token: str = ""
 
     cors_origins: str = "*"
 

@@ -8,16 +8,19 @@ into their own error surface (HTTP status / tool error message).
 """
 from __future__ import annotations
 
+import httpx
 import psycopg
 from psycopg import errors as pg_errors
 
 from app.core.config import settings
 from app.core.identity import Principal
+from app.integrations import trackers
 from app.integrations.pipeline import get_runner
 from app.repositories import products as products_repo
 from app.repositories import releases as repo
 from app.services import appconfig, audit
-from app.services.release_status import compute_status, unmet_requirements
+from app.services import issues as issues_svc
+from app.services.release_status import guard_status, unmet_requirements
 from app.services.state_machine import StateError, StateMachine
 
 # State name that triggers the production sync/install pipeline (docs: Approved).
@@ -42,11 +45,25 @@ def create_release(
     product_id: int,
     version: str,
     short_description: str = "",
+    filter_mode: str,
+    filter_value: str,
 ) -> dict:
-    """Create a release in the initial workflow state and record the creation
-    in the audit trail."""
+    """Create a release in the initial workflow state, store the search criteria
+    that defines which tickets it contains, and audit both.
+
+    The criteria is not optional: it is how every later question about this
+    release's issues ("is anything still open?", "how many bugs?") is put to the
+    ticketing system. A release without one would have no defensible answer —
+    only a provider default that happens to guess at the version.
+    """
     if products_repo.get(conn, product_id) is None:
         raise ReleaseActionError(404, "Product not found")
+    cfg = appconfig.effective(conn)
+    try:
+        mode, value = issues_svc.validate_criteria(cfg, filter_mode, filter_value)
+    except issues_svc.IssueCriteriaError as exc:
+        raise ReleaseActionError(422, str(exc)) from exc
+
     try:
         row = repo.create(
             conn,
@@ -59,9 +76,28 @@ def create_release(
         raise ReleaseActionError(
             409, f"A release with version '{version}' already exists for this product"
         ) from exc
+
+    issues_svc.save_criteria(conn, row["id"], mode, value)
     audit.record(conn, entity_type="release", entity_id=row["id"],
                  action="created", operator=principal.subject, new_value=row["state"])
+    audit.record(conn, entity_type="release", entity_id=row["id"],
+                 action="issue_criteria", operator=principal.subject,
+                 new_value=f"{mode} = {value}")
     return row
+
+
+def _tracker_failure(exc: Exception) -> ReleaseActionError:
+    """A tracker that could not be asked refuses the transition (503).
+
+    Fail closed. For a release gate, "we could not check" must never quietly
+    become "the check passed" — the alternative, answering the guard from an
+    empty issue list, reads as "nothing is open" and approves the release.
+    """
+    if isinstance(exc, trackers.TrackerNotConfigured):
+        return ReleaseActionError(503, f"Cannot verify this release's issues: {exc}")
+    return ReleaseActionError(
+        503, f"Cannot verify this release's issues — the tracker is unreachable: {exc}"
+    )
 
 
 def apply_transition(
@@ -75,6 +111,12 @@ def apply_transition(
     """Apply a workflow transition, enforcing (in order) legality, per-transition
     roles, and the readiness guards. On reaching ``Approved`` with GitLab CI
     configured, the install pipeline is triggered.
+
+    A guard backed by the tracker (``no_open_issues``) is decided on the tracker's
+    live answer — the release's issues are read from the ticketing system as the
+    guard is evaluated — and the transition is refused outright if the tracker
+    cannot be reached. A transition that declares no such guard (Reject, Cancel)
+    never touches the tracker, so it still works when the tracker is down.
 
     ``note`` is an optional free-text comment the operator may attach to explain
     the state change; it is stored on the audit entry."""
@@ -101,7 +143,11 @@ def apply_transition(
 
     # Readiness guards declared in states.yaml (e.g. Approve needs all issues
     # closed and the required docs present). Reject and Cancel stay unguarded.
-    unmet = unmet_requirements(trans.requires, compute_status(conn, rel))
+    try:
+        status = guard_status(conn, rel, trans.requires)
+    except (trackers.TrackerError, httpx.HTTPError, ValueError) as exc:
+        raise _tracker_failure(exc) from exc
+    unmet = unmet_requirements(trans.requires, status)
     if unmet:
         raise ReleaseActionError(
             409,

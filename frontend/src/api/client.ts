@@ -45,7 +45,7 @@ api.interceptors.response.use(
 
 // --- Typed API helpers -----------------------------------------------------
 export interface Product {
-  id: number; name: string; solution_id: number | null; tracker_repo: string;
+  id: number; name: string; tracker_repo: string;
 }
 export interface Release {
   id: number; product_id: number; version: string; state: string;
@@ -57,13 +57,29 @@ export interface ProductOverview extends Product {
   draft: Release | null;
   under_approval: Release | null;
 }
-export interface JiraIssue {
-  id: number; release_id: number; issue_key: string;
-  issue_type: string; summary: string; status: string;
-  // The issue's page in the tracker's web UI; empty for issues cached before
-  // the URL was recorded (they get one on the next sync).
-  url: string;
-  synced_at: string;
+// One ticket, as the ticketing system reports it *now*. Nothing about issues is
+// stored by Release-It, so there is no row id and no "synced at" — every list is
+// read from the tracker when it is displayed.
+export interface Issue {
+  key: string; type: string; summary: string; status: string;
+  // Whether the tracker considers the issue finished — its own verdict (Jira's
+  // statusCategory, GitHub/GitLab's issue state), not a match against a status
+  // name. A project may call its done-status "Resolved" and this is still true.
+  closed: boolean;
+  url: string;  // the issue's page in the tracker's web UI
+}
+
+// The search criteria that defines which tickets a release contains, e.g.
+// label = v0.0.1. Which modes are valid depends on the tracker: GitHub takes
+// milestone/label, Jira takes label/jql.
+export type IssueFilterMode = "milestone" | "label" | "jql";
+export interface IssueFilter { mode: IssueFilterMode; value: string }
+export interface IssueFilterView extends IssueFilter {
+  release_id: number; updated_at: string;
+}
+// What a criteria finds, previewed before it is bound to a release.
+export interface IssueSearchResult {
+  query: string; total: number; bug_count: number; issues: Issue[];
 }
 // One issue read live from the tracker. Fields the active tracker does not
 // carry come back empty (GitHub has no priority, an unassigned issue no assignee).
@@ -121,8 +137,10 @@ export interface ReleaseStatusSummary {
   release_id: number;
   state: string;
   open_bug_count: number;
-  open_bugs: JiraIssue[];
+  open_bugs: Issue[];
   present_doc_types: string[];
+  // The approved subset of present_doc_types — what `document:<type>` guards need.
+  approved_doc_types: string[];
   is_ready: boolean;
 }
 
@@ -141,15 +159,12 @@ export interface LLMConfigView {
 }
 export interface ConfigView {
   tracker_provider: "jira" | "github";
-  // Scheduled issue sync interval in minutes (0 = disabled). Default: 10.
-  sync_interval_minutes: number;
   jira: JiraConfigView;
   github: GitHubConfigView;
   llm: LLMConfigView;
 }
 export interface ConfigUpdate {
   tracker_provider?: "jira" | "github";
-  sync_interval_minutes?: number;
   jira_enabled?: boolean; jira_base_url?: string; jira_token?: string;
   github_enabled?: boolean; github_base_url?: string; github_token?: string;
   llm_provider?: "claude" | "ollama";
@@ -175,8 +190,11 @@ export const getOverview = () =>
   api.get<ProductOverview[]>("/api/v1/product/overview").then((r) => r.data);
 export const getProduct = (productId: number) =>
   api.get<Product>(`/api/v1/product/${productId}`).then((r) => r.data);
-export const createProduct = (name: string) =>
-  api.post<Product>("/api/v1/product", { name }).then((r) => r.data);
+// The issue-tracker project is optional here, but the backend verifies it exists
+// when one is given — a project bound to a repo that isn't there would fail later,
+// at the point where a release tries to read its tickets.
+export const createProduct = (name: string, tracker_repo = "") =>
+  api.post<Product>("/api/v1/product", { name, tracker_repo }).then((r) => r.data);
 export const updateProduct = (
   productId: number,
   patch: { name?: string; tracker_repo?: string }
@@ -187,8 +205,14 @@ export const deleteProduct = (productId: number) =>
 // --- Releases --------------------------------------------------------------
 export const listReleases = (productId: number) =>
   api.get<Release[]>(`/api/v1/product/${productId}/releases`).then((r) => r.data);
-export const createRelease = (product_id: number, version: string) =>
-  api.post<Release>("/api/v1/release", { product_id, version }).then((r) => r.data);
+// A release is created with the criteria that says which tickets it contains —
+// the API requires it, and the UI shows the operator those tickets first.
+export const createRelease = (
+  product_id: number,
+  version: string,
+  issue_filter: IssueFilter
+) =>
+  api.post<Release>("/api/v1/release", { product_id, version, issue_filter }).then((r) => r.data);
 export const deleteRelease = (releaseId: number) =>
   api.delete(`/api/v1/release/${releaseId}`).then((r) => r.data);
 export const transitionRelease = (releaseId: number, transition: string, note = "") =>
@@ -323,31 +347,61 @@ export async function downloadDocumentVersion(
   URL.revokeObjectURL(url);
 }
 
-// --- Jira integration ------------------------------------------------------
-export const listJiraIssues = (releaseId: number) =>
-  api.get<JiraIssue[]>(`/api/v1/release/${releaseId}/jira/issues`).then((r) => r.data);
-export const syncJira = (
-  releaseId: number,
-  filter: { release_label?: string; jql?: string; milestone?: string }
-) => api.post<JiraIssue[]>(`/api/v1/release/${releaseId}/jira/sync`, filter).then((r) => r.data);
-// Full detail for one issue, fetched from the tracker on demand (not cached).
-export const getIssueDetail = (releaseId: number, key: string) =>
+// --- Issues (always read live from the ticketing system) -------------------
+// There is no sync and no stored issue list: a release stores the criteria that
+// says which tickets belong to it, and every read below resolves that criteria
+// against the tracker and returns what it says right now.
+export const listReleaseIssues = (releaseId: number) =>
+  api.get<Issue[]>(`/api/v1/release/${releaseId}/issues`).then((r) => r.data);
+
+// Preview the tickets a criteria selects, before a release exists. This is what
+// the operator confirms when creating one.
+export const searchIssues = (
+  product_id: number,
+  mode: IssueFilterMode,
+  value: string
+) =>
   api
-    .get<IssueDetail>(`/api/v1/release/${releaseId}/jira/issue`, { params: { key } })
+    .post<IssueSearchResult>("/api/v1/release/issues/search", { product_id, mode, value })
     .then((r) => r.data);
 
-// Total bugs in a release, counted live from the active tracker by the release
-// label v<major>.<minor>.<patch> (e.g. v0.0.1).
-export interface ReleaseBugCount { release_id: number; label: string; total_bugs: number }
+// Adding/removing a ticket EDITS THE TICKET in the ticketing system: a ticket is
+// in a release because it matches the release's criteria, so adding one means
+// making it match (criteria `label = v0.0.1` → the label v0.0.1 is put on the
+// ticket) and removing one means making it stop. The result is read back from the
+// tracker, so `member` is what the tracker says, not what we hoped.
+export interface IssueMembershipResult {
+  key: string; member: boolean; criteria: string; total: number; issues: Issue[];
+}
+export const addIssueToRelease = (releaseId: number, key: string) =>
+  api
+    .post<IssueMembershipResult>(`/api/v1/release/${releaseId}/issues/add`, { key })
+    .then((r) => r.data);
+export const removeIssueFromRelease = (releaseId: number, key: string) =>
+  api
+    .post<IssueMembershipResult>(`/api/v1/release/${releaseId}/issues/remove`, { key })
+    .then((r) => r.data);
+
+// Full detail for one issue (description, people, timestamps).
+export const getIssueDetail = (releaseId: number, key: string) =>
+  api
+    .get<IssueDetail>(`/api/v1/release/${releaseId}/issue`, { params: { key } })
+    .then((r) => r.data);
+
+// Total bugs in a release, counted over the same tickets the readiness gate
+// uses — the release's stored criteria.
+export interface ReleaseBugCount { release_id: number; filter: string; total_bugs: number }
 export const getReleaseBugCount = (releaseId: number) =>
   api.get<ReleaseBugCount>(`/api/v1/release/${releaseId}/bugs/count`).then((r) => r.data);
 
-// Saved per-release tracker filter (milestone | label | jql), applied automatically.
-export interface SyncFilter { release_id: number; mode: string; value: string; updated_at: string }
-export const getSyncFilter = (releaseId: number) =>
-  api.get<SyncFilter | null>(`/api/v1/release/${releaseId}/sync-filter`).then((r) => r.data);
-export const saveSyncFilter = (releaseId: number, mode: string, value: string) =>
-  api.put<SyncFilter>(`/api/v1/release/${releaseId}/sync-filter`, { mode, value }).then((r) => r.data);
+// The release's stored criteria. `null` only for releases created before criteria
+// were recorded — those fall back to the tracker's native release grouping.
+export const getIssueFilter = (releaseId: number) =>
+  api.get<IssueFilterView | null>(`/api/v1/release/${releaseId}/issue-filter`).then((r) => r.data);
+export const saveIssueFilter = (releaseId: number, mode: IssueFilterMode, value: string) =>
+  api
+    .put<IssueFilterView>(`/api/v1/release/${releaseId}/issue-filter`, { mode, value })
+    .then((r) => r.data);
 
 // --- LLM assistant (chat) --------------------------------------------------
 export interface ChatMessage { role: "user" | "assistant"; content: string }

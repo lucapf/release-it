@@ -1,4 +1,4 @@
-"""Audit logging for state-affecting actions on Solution/Product/Release."""
+"""Audit logging for state-affecting actions on Product/Release."""
 from __future__ import annotations
 
 import psycopg

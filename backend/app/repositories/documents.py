@@ -62,10 +62,22 @@ def find_document(conn: psycopg.Connection, release_id: int, title: str) -> dict
 
 
 def present_types(conn: psycopg.Connection, release_id: int) -> set[str]:
-    """The set of document types that have at least one document on the release.
-    Used to evaluate ``document:<type>`` workflow readiness guards."""
+    """The set of document types that have at least one document on the release,
+    whatever its status. Display only — a `document:<type>` readiness guard is
+    satisfied by `approved_types`, not by this."""
     rows = conn.execute(
         "SELECT DISTINCT doc_type FROM document WHERE release_id = %s",
+        (release_id,),
+    ).fetchall()
+    return {r["doc_type"] for r in rows}
+
+
+def approved_types(conn: psycopg.Connection, release_id: int) -> set[str]:
+    """The set of document types that have at least one APPROVED document on the
+    release. A ``document:<type>`` readiness guard requires the document to be
+    both attached and approved, so a DRAFT document does not satisfy it."""
+    rows = conn.execute(
+        "SELECT DISTINCT doc_type FROM document WHERE release_id = %s AND status = 'APPROVED'",
         (release_id,),
     ).fetchall()
     return {r["doc_type"] for r in rows}

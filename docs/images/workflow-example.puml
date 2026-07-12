@@ -1,0 +1,33 @@
+@startuml
+actor Developer as developer
+actor QA as qa 
+participant "Release-IT" as releaseit
+participant "Git repo" as git
+participant "GitLab" as automation
+participant "Jira" as ticketing
+
+developer -> git: commit master app-of-apps
+git ->automation: create a new release\n(ex. v0.0.1)
+git -> releaseit: aling the new release for product
+developer -> ticketing: link tickes to the new release
+developer [#blue]-> releaseit: **@assistant**\n give me the status of the project X
+activate releaseit
+releaseit ->  ticketing: lookup for issues linked to the relese.
+releaseit [#blue]->  developer: here the list of the tickets. Is what you supposed to get?
+developer [#blue]-> releaseit: **@assistant** add PRJ-12
+developer [#blue]-> releaseit: **@assistant**\n remove PRJ-123 was linked by mistake
+developer [#blue]-> releaseit: **@assistant** good to go
+releaseit -> releaseit: checks readiness gates
+releaseit [#blue]-> developer: your release is ready for QA,\nyou wanna me to notify them?
+deactivate releaseit
+
+developer [#blue]-> releaseit: yes pls
+activate releaseit
+  releaseit -> ticketing: create: \nrelease ticket with \n description of new features/ bugs\nattach all related ticket to it.
+  releaseit -> tiketing: sync tickets
+  releaseit -> releaseit: generates release notes (DRAFT)
+  releaseit [#blue]-> qa: **@QA**\n a new release for the product is ready!\n here a description with the bug list.\n I drafted the  Release Note for you.\nPls review and approve it.
+
+deactivate releaseit
+
+@enduml

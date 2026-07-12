@@ -7,7 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.db.pool import get_conn
 from app.integrations import trackers
-from app.integrations.trackers import TrackerProjectNotFound, TrackerUnreachable
+from app.integrations.trackers import (
+    TrackerNotConfigured,
+    TrackerProjectNotFound,
+    TrackerUnreachable,
+)
 from app.repositories import products as repo
 from app.repositories import releases as releases_repo
 from app.schemas.models import (
@@ -24,16 +28,32 @@ router = APIRouter()
 
 def _verify_tracker_project(conn: psycopg.Connection, tracker_repo: str | None) -> None:
     """Confirm the issue-tracker project bound to a product actually exists,
-    rejecting the save with a clear message when it does not or the tracker is
-    unreachable. Skipped when no project is set or no tracker is enabled/configured
-    (there is nothing to check against)."""
+    rejecting the save with a clear message when it does not, when the tracker is
+    unreachable, or when there is no tracker to ask.
+
+    A binding nobody checked must not end up looking like one that passed: with no
+    tracker enabled, every value verifies vacuously and the product is saved
+    pointing at a repository that may not exist. So a project can only be bound
+    once the tracker that has to answer for it is configured. Clearing the binding
+    is always allowed — an empty value asks the tracker nothing.
+    """
     repo_val = (tracker_repo or "").strip()
     if not repo_val:
         return
     cfg = appconfig.effective(conn)
-    active = cfg.github if cfg.provider == "github" else cfg.jira
-    if not (active.enabled and active.base_url):
-        return  # no enabled/configured tracker to verify against
+    try:
+        trackers.require_configured(cfg)
+    except TrackerNotConfigured as exc:
+        # Deliberately not named after the active provider: with no tracker
+        # enabled the provider is just the default, and telling someone who typed
+        # a GitHub repo that their "Jira project" cannot be verified is nonsense.
+        raise HTTPException(
+            400,
+            f'Cannot verify the issue-tracker project "{repo_val}": no issue tracker '
+            "is enabled and configured. Set up the tracker on the Configuration page "
+            "first, or leave this project's issue tracker field empty.",
+        ) from exc
+
     label = "GitHub repository" if cfg.provider == "github" else "Jira project"
     try:
         trackers.verify_project(cfg, repo_val)
@@ -62,7 +82,7 @@ def products_overview(conn: psycopg.Connection = Depends(get_conn)):
 @router.post("", response_model=Product, status_code=201)
 def create_product(body: ProductCreate, conn: psycopg.Connection = Depends(get_conn)):
     _verify_tracker_project(conn, body.tracker_repo)
-    return repo.create(conn, body.name, body.solution_id, body.tracker_repo)
+    return repo.create(conn, body.name, body.tracker_repo)
 
 
 @router.get("/{product_id}", response_model=Product)

@@ -27,10 +27,8 @@ spec:
             - { name: DB_POOL_MIN_SIZE, value: {{ .Values.dbPool.minSize | quote }} }
             - { name: DB_POOL_MAX_SIZE, value: {{ .Values.dbPool.maxSize | quote }} }
             - { name: MAX_DOCUMENT_SIZE_MB, value: {{ .Values.maxDocumentSizeMb | quote }} }
-            - { name: SOLUTION_ENABLED, value: {{ .Values.solutionEnabled | quote }} }
             - { name: AUTH_ENABLED, value: {{ .Values.authEnabled | quote }} }
             - { name: DEFAULT_TRANSITION_ROLES, value: {{ .Values.defaultTransitionRoles | quote }} }
-            - { name: CLOSED_BUG_STATUSES, value: {{ .Values.closedBugStatuses | quote }} }
             - { name: JWT_ISSUER, value: {{ .Values.jwt.issuer | quote }} }
             - { name: JWT_AUDIENCE, value: {{ .Values.jwt.audience | quote }} }
             - { name: JWT_JWKS_URL, value: {{ .Values.jwt.jwksUrl | quote }} }
@@ -51,9 +49,6 @@ spec:
             - { name: GITLAB_ENABLED, value: {{ .Values.integrations.gitlab.enabled | quote }} }
             - { name: GITLAB_BASE_URL, value: {{ .Values.integrations.gitlab.baseUrl | quote }} }
             - { name: GITLAB_TOKEN, value: {{ .Values.integrations.gitlab.token | quote }} }
-            - { name: AWX_ENABLED, value: {{ .Values.integrations.awx.enabled | quote }} }
-            - { name: AWX_BASE_URL, value: {{ .Values.integrations.awx.baseUrl | quote }} }
-            - { name: AWX_TOKEN, value: {{ .Values.integrations.awx.token | quote }} }
             - { name: CORS_ORIGINS, value: {{ .Values.corsOrigins | quote }} }
           ports: [{ containerPort: 8000 }]
           readinessProbe:

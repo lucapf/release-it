@@ -11,7 +11,7 @@ import httpx
 
 import app.integrations.trackers.github as github_mod
 import app.integrations.trackers.jira as jira_mod
-from app.integrations.trackers import DONE, count_bugs, release_label
+from app.integrations.trackers import DONE, count_bugs
 from app.integrations.trackers.base import (
     TrackerProjectNotFound,
     TrackerUnreachable,
@@ -51,7 +51,11 @@ REAL_JIRA_SEARCH = {
             "fields": {
                 "summary": "add export",
                 "issuetype": {"id": "3", "name": "Story"},
-                "status": {"id": "10002", "name": "Done"},
+                "status": {
+                    "id": "10002",
+                    "name": "Done",
+                    "statusCategory": {"key": "done", "name": "Done"},
+                },
             },
         },
     ],
@@ -95,15 +99,62 @@ def test_jira_client_parses_real_search_response(monkeypatch):
     # endpoint, not a page).
     assert issues == [
         {"key": "REL-1", "type": "Bug", "summary": "crash on save", "status": "To Do",
-         "url": "https://jira.example.com/browse/REL-1"},
+         "closed": False, "url": "https://jira.example.com/browse/REL-1"},
         {"key": "REL-2", "type": "Story", "summary": "add export", "status": "Done",
-         "url": "https://jira.example.com/browse/REL-2"},
+         "closed": True, "url": "https://jira.example.com/browse/REL-2"},
     ]
 
 
 def test_jira_client_returns_empty_when_not_configured():
     assert JiraTracker(TrackerConfig(False, "", "")).fetch_issues("x") == []
     assert JiraTracker(TrackerConfig(True, "", "")).fetch_issues("x") == []
+
+
+# --- "Is this issue finished?" is Jira's call, not ours ---------------------
+def _jira_issues_with_status(monkeypatch, status: dict) -> list[dict]:
+    payload = {"issues": [{"key": "REL-1", "fields": {
+        "summary": "s", "issuetype": {"name": "Bug"}, "status": status,
+    }}]}
+    monkeypatch.setattr(
+        jira_mod.httpx, "get",
+        lambda url, headers=None, params=None, timeout=None: _Resp(payload),
+    )
+    tracker = JiraTracker(TrackerConfig(True, "https://jira.example.com", "t"))
+    return tracker.fetch_issues("x")
+
+
+def test_closed_follows_the_status_category_not_the_status_name(monkeypatch):
+    """A project is free to call its done-status "Resolved", "Shipped", anything.
+    Jira groups every status into a *statusCategory*, and that is what says the
+    issue is finished.
+
+    Release-It used to decide this itself, by matching the status name against a
+    configured CLOSED_BUG_STATUSES list (default "Done"). On a project whose
+    done-status was called "Resolved", every issue therefore counted as open
+    forever — `no_open_issues` could never be satisfied and the release could
+    never be approved. This is that bug.
+    """
+    resolved = _jira_issues_with_status(
+        monkeypatch,
+        {"name": "Resolved", "statusCategory": {"key": "done", "name": "Done"}},
+    )
+    assert resolved[0]["status"] == "Resolved"
+    assert resolved[0]["closed"] is True
+
+    # ...and the converse: a status *named* "Done" that Jira does not categorise
+    # as done (a project can do this) is still open.
+    in_progress = _jira_issues_with_status(
+        monkeypatch,
+        {"name": "Done", "statusCategory": {"key": "indeterminate", "name": "In Progress"}},
+    )
+    assert in_progress[0]["closed"] is False
+
+
+def test_a_status_with_no_category_counts_as_open(monkeypatch):
+    """Fail safe. If we cannot tell whether an issue is finished, it must keep
+    blocking a guarded transition — never unblock one on no evidence."""
+    unknown = _jira_issues_with_status(monkeypatch, {"name": "Done"})
+    assert unknown[0]["closed"] is False
 
 
 # --- Single-issue detail (the on-demand "view details" action) --------------
@@ -117,7 +168,11 @@ REAL_JIRA_ISSUE = {
         "summary": "crash on save",
         "description": "Steps:\n1. open\n2. save",
         "issuetype": {"id": "1", "name": "Bug", "subtask": False},
-        "status": {"id": "10000", "name": "To Do"},
+        "status": {
+            "id": "10000",
+            "name": "To Do",
+            "statusCategory": {"key": "new", "name": "To Do"},
+        },
         "priority": {"id": "3", "name": "High"},
         "assignee": {"name": "adevs", "displayName": "A. Developer"},
         "reporter": {"name": "qa", "displayName": "Q. Assurance"},
@@ -148,6 +203,7 @@ def test_jira_client_fetches_one_issue_in_full(monkeypatch):
         "type": "Bug",
         "summary": "crash on save",
         "status": "To Do",
+        "closed": False,
         "url": "https://jira.example.com/browse/REL-1",
         "description": "Steps:\n1. open\n2. save",
         "assignee": "A. Developer",
@@ -222,6 +278,7 @@ def test_github_client_fetches_one_issue_in_full(monkeypatch):
         "type": "bug",
         "summary": "crash on save",
         "status": DONE,
+        "closed": True,
         "url": "https://github.com/acme/app/issues/12",
         "description": "Steps:\n1. open\n2. save",
         "assignee": "dev1",
@@ -241,17 +298,12 @@ def test_github_issue_detail_needs_a_repo_and_a_numeric_key():
     assert GitHubTracker(TrackerConfig(False, "", "")).fetch_issue("#12") is None
 
 
-# --- Release label + bug counting (the /bugs/count endpoint's logic) --------
-def test_release_label_is_v_major_minor_patch():
-    assert release_label("0.0.1") == "v0.0.1"
-    assert release_label("1.2.0") == "v1.2.0"
-    # Tolerates a stored leading "v" and surrounding text without doubling it.
-    assert release_label("v1.2.3") == "v1.2.3"
-    assert release_label("release 2.10.4 (hotfix)") == "v2.10.4"
-    # Non-semver versions fall back to v<version> as-is.
-    assert release_label("2025-Q3") == "v2025-Q3"
-
-
+# --- Bug counting (the /bugs/count endpoint's logic) ------------------------
+# NOTE: there is no longer a `release_label()` helper. It derived a
+# "v<major>.<minor>.<patch>" label that only /bugs/count used, to run its own
+# issue query — which is exactly how that endpoint came to disagree with the
+# status endpoint about how many bugs a release contained. Both now resolve the
+# release's issues through trackers.release_query(); see test_issues.
 def test_count_bugs_matches_normalized_type_case_insensitively():
     issues = [
         {"key": "#1", "type": "bug", "summary": "gh bug", "status": "Open"},       # GitHub

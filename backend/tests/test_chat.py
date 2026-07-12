@@ -170,7 +170,10 @@ def test_describe_actions_covers_every_tool_and_flags_writes():
     assert described["create_release"]["kind"] == "action"
     assert described["upload_document"]["kind"] == "action"
     assert described["transition_release"]["kind"] == "action"
-    assert described["sync_release_issues"]["kind"] == "action"
+    assert described["set_release_criteria"]["kind"] == "action"
+    # Reading a release's issues asks the ticketing system — it changes nothing here.
+    assert described["list_release_issues"]["kind"] == "read"
+    assert described["search_issues"]["kind"] == "read"
     assert described["get_release_status"]["kind"] == "read"
     assert described["list_products"]["kind"] == "read"
 

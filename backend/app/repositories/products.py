@@ -4,29 +4,27 @@ from __future__ import annotations
 import psycopg
 
 
-def create(
-    conn: psycopg.Connection, name: str, solution_id: int | None, tracker_repo: str = ""
-) -> dict:
+def create(conn: psycopg.Connection, name: str, tracker_repo: str = "") -> dict:
     return conn.execute(
         """
-        INSERT INTO product (name, solution_id, tracker_repo)
-        VALUES (%s, %s, %s)
-        RETURNING id, name, solution_id, tracker_repo, created_at
+        INSERT INTO product (name, tracker_repo)
+        VALUES (%s, %s)
+        RETURNING id, name, tracker_repo, created_at
         """,
-        (name, solution_id, tracker_repo),
+        (name, tracker_repo),
     ).fetchone()
 
 
 def get(conn: psycopg.Connection, product_id: int) -> dict | None:
     return conn.execute(
-        "SELECT id, name, solution_id, tracker_repo, created_at FROM product WHERE id = %s",
+        "SELECT id, name, tracker_repo, created_at FROM product WHERE id = %s",
         (product_id,),
     ).fetchone()
 
 
 def list_all(conn: psycopg.Connection) -> list[dict]:
     return conn.execute(
-        "SELECT id, name, solution_id, tracker_repo, created_at FROM product ORDER BY name"
+        "SELECT id, name, tracker_repo, created_at FROM product ORDER BY name"
     ).fetchall()
 
 
@@ -54,7 +52,7 @@ def update(
         f"""
         UPDATE product SET {', '.join(sets)}
         WHERE id = %s
-        RETURNING id, name, solution_id, tracker_repo, created_at
+        RETURNING id, name, tracker_repo, created_at
         """,
         params,
     ).fetchone()
@@ -81,7 +79,7 @@ def overview(conn: psycopg.Connection) -> list[dict]:
     return conn.execute(
         f"""
         SELECT
-            p.id, p.name, p.solution_id, p.tracker_repo, p.created_at,
+            p.id, p.name, p.tracker_repo, p.created_at,
             (SELECT count(*) FROM release WHERE product_id = p.id) AS release_count,
             (
                 SELECT to_jsonb(s) FROM (

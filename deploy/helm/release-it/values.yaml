@@ -13,7 +13,6 @@
 
 # releaseit-backend:
 #   replicas: 2
-#   solutionEnabled: true
 #   # Maximum size of a single uploaded document, in MB (default 10).
 #   maxDocumentSizeMb: 25
 

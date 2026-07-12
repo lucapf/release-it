@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 # --- Product ---------------------------------------------------------------
 class ProductCreate(BaseModel):
     name: str
-    solution_id: int | None = None
     # The product's issue-tracker project, e.g. a GitHub "owner/repo".
     tracker_repo: str = ""
 
@@ -25,16 +24,37 @@ class ProductUpdate(BaseModel):
 class Product(BaseModel):
     id: int
     name: str
-    solution_id: int | None = None
     tracker_repo: str = ""
     created_at: datetime
 
 
 # --- Release ---------------------------------------------------------------
+class IssueFilter(BaseModel):
+    """The search criteria that defines which tickets a release contains, e.g.
+    ``label = v0.0.1``. Which modes are valid depends on the active tracker —
+    GitHub: ``milestone | label``; Jira: ``label | jql``.
+
+    This is the *only* thing Release-It stores about a release's issues. The
+    tickets themselves are read from the ticketing system every time they are
+    asked for.
+    """
+    mode: str = Field(description="milestone | label | jql")
+    value: str = Field(min_length=1, description="The value to search for in that mode")
+
+
+class IssueFilterView(IssueFilter):
+    release_id: int
+    updated_at: datetime
+
+
 class ReleaseCreate(BaseModel):
     product_id: int
     version: str
     short_description: str = ""
+    # Required: a release is defined by the tickets it contains, and that
+    # definition is the criteria. The UI asks for it (and previews the tickets it
+    # finds) before the release is created.
+    issue_filter: IssueFilter
 
 
 class Release(BaseModel):
@@ -52,7 +72,6 @@ class ProductOverview(BaseModel):
     under-approval releases."""
     id: int
     name: str
-    solution_id: int | None = None
     tracker_repo: str = ""
     created_at: datetime
     release_count: int = 0
@@ -144,32 +163,53 @@ class DocumentStatusUpdate(BaseModel):
     status: Literal["DRAFT", "APPROVED"]
 
 
-# --- Issue-tracker sync ----------------------------------------------------
-class JiraSyncRequest(BaseModel):
-    """Filter for an issue sync. The meaningful fields depend on the active
-    tracker:
-
-    * Jira   — ``jql`` (raw query, takes precedence) or ``release_label``
-      (mapped to ``labels = "<label>"``); otherwise ``fixVersion = "<version>"``.
-    * GitHub — ``milestone`` (issues in that milestone; defaults to the release
-      version) or ``release_label`` (a GitHub label).
-    """
-    release_label: str | None = Field(default=None, description="Tracker label to filter by")
-    jql: str | None = Field(default=None, description="Jira: raw JQL query (takes precedence)")
-    milestone: str | None = Field(default=None, description="GitHub: milestone title (defaults to the release version)")
-
-
-class JiraIssue(BaseModel):
-    id: int
-    release_id: int
-    issue_key: str
-    issue_type: str
+# --- Issues (read live from the ticketing system) --------------------------
+class Issue(BaseModel):
+    """One ticket as the tracker reports it *now*. Not a stored row: there is no
+    database id and no "synced at" time, because nothing is stored — the list is
+    fetched from the ticketing system on every request."""
+    key: str
+    type: str
     summary: str
     status: str
-    # The issue's page in the tracker's web UI. Empty for issues cached before
-    # the URL was recorded — they get one on the next sync.
-    url: str = ""
-    synced_at: datetime
+    # Whether the tracker considers the issue finished. The tracker's own verdict
+    # (Jira: statusCategory "done"; GitHub/GitLab: a closed issue), not a match
+    # against a status name Release-It was configured with — a project may call
+    # its done-status whatever it likes.
+    closed: bool = False
+    url: str = ""  # the issue's page in the tracker's web UI
+
+
+class IssueSearch(BaseModel):
+    """Preview a search criteria against the tracker before a release exists, so
+    the operator can see which tickets it selects and correct it if they are the
+    wrong ones."""
+    product_id: int
+    mode: str = Field(description="milestone | label | jql")
+    value: str = Field(min_length=1)
+
+
+class IssueRef(BaseModel):
+    """A ticket to add to / remove from a release, by its key in the tracker."""
+    key: str = Field(min_length=1, description="Issue key, e.g. 'REL-1' or '#12'")
+
+
+class IssueMembershipResult(BaseModel):
+    """The outcome of adding/removing a ticket, read back from the tracker."""
+    key: str
+    member: bool          # whether the ticket is now in the release
+    criteria: str         # the criteria the ticket was edited to match, e.g. 'label = v0.0.1'
+    total: int            # how many tickets the release now contains
+    issues: list[Issue] = []
+
+
+class IssueSearchResult(BaseModel):
+    # The resolved tracker query (Jira: JQL; GitHub: a milestone title or label).
+    # Diagnostic — it tells the operator exactly what was asked of the tracker.
+    query: str
+    total: int
+    bug_count: int
+    issues: list[Issue] = []
 
 
 class IssueDetail(BaseModel):
@@ -180,6 +220,7 @@ class IssueDetail(BaseModel):
     type: str
     summary: str
     status: str
+    closed: bool = False
     url: str = ""
     description: str = ""
     assignee: str = ""
@@ -188,19 +229,6 @@ class IssueDetail(BaseModel):
     labels: list[str] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
-
-
-class SyncFilter(BaseModel):
-    """The tracker filter an operator chose for a release, persisted so it can
-    be re-applied automatically. ``mode`` is one of ``milestone | label | jql``.
-    """
-    mode: str = Field(description="milestone | label | jql")
-    value: str = Field(default="", description="The filter value for the chosen mode")
-
-
-class SyncFilterView(SyncFilter):
-    release_id: int
-    updated_at: datetime
 
 
 # --- Runtime configuration -------------------------------------------------
@@ -237,8 +265,6 @@ class LLMConfigView(BaseModel):
 class ConfigView(BaseModel):
     """Current configuration as shown on the configuration page (no secrets)."""
     tracker_provider: str = "jira"
-    # Scheduled issue sync interval, in minutes (0 = disabled). Default: 10.
-    sync_interval_minutes: int = 10
     jira: JiraConfigView = JiraConfigView()
     github: GitHubConfigView = GitHubConfigView()
     llm: LLMConfigView = LLMConfigView()
@@ -248,9 +274,6 @@ class ConfigUpdate(BaseModel):
     """Configuration update. A token/key left as None/empty is kept unchanged,
     so secrets are write-only — they are never echoed back by the API."""
     tracker_provider: Literal["jira", "github"] | None = None
-    sync_interval_minutes: int | None = Field(
-        default=None, ge=0, description="Scheduled issue sync interval in minutes (0 disables)"
-    )
     jira_enabled: bool | None = None
     jira_base_url: str | None = None
     jira_token: str | None = None
@@ -318,22 +341,34 @@ class TransitionRolesUpdate(BaseModel):
 
 # --- Release status summary ------------------------------------------------
 class ReleaseStatusSummary(BaseModel):
-    """Aggregated readiness view for a single release."""
+    """Aggregated readiness view for a single release. The issue side of it is
+    read from the ticketing system as the summary is built — it is never served
+    from a stored copy."""
     release_id: int
     state: str
     open_bug_count: int = 0
-    open_bugs: list[JiraIssue] = []
-    # Document types currently uploaded on the release — feeds `document:<type>`
-    # workflow readiness guards.
+    open_bugs: list[Issue] = []
+    # Document types currently uploaded on the release, whatever their status.
     present_doc_types: list[str] = []
+    # The approved subset of the above. A `document:<type>` workflow readiness
+    # guard needs the document attached *and* approved, so it reads this one.
+    approved_doc_types: list[str] = []
     is_ready: bool = False
 
 
 class ReleaseBugCount(BaseModel):
-    """Total bugs in a release, counted live from the active tracker by the
-    release label ``v<major>.<minor>.<patch>`` (e.g. ``v0.0.1``)."""
+    """Total bugs in a release, counted live from the active tracker.
+
+    Counted over *the same issue set* the readiness gate uses — the release's
+    stored search criteria. It used to be counted over a separate ``v<x.y.z>``
+    label query, so this endpoint and the status endpoint could report different
+    numbers of bugs for one release.
+    """
     release_id: int
-    label: str
+    # The resolved tracker filter the count was taken over (Jira: JQL; GitHub: a
+    # milestone title or label). Diagnostic — it tells an operator *which* issues
+    # were counted when the number looks wrong.
+    filter: str
     total_bugs: int
 
 

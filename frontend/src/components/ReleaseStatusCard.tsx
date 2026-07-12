@@ -13,22 +13,44 @@ import {
 } from "@mantine/core";
 import { IconAlertTriangle, IconCheck } from "@tabler/icons-react";
 import { getReleaseStatus, Release } from "../api/client";
+import { apiErrorMessage } from "../lib/errors";
 import { StateBadge } from "./StateBadge";
 import { WorkflowActions } from "./WorkflowActions";
 
 // Per-release readiness overview: current state, allowed workflow actions, the
-// open (not-yet-closed) tracker issues, and the uploaded document types.
+// open (not-yet-closed) tickets, and the uploaded document types.
+//
+// The issues come from the ticketing system as this renders, so this view can
+// fail — and when it does it says so rather than showing a release with no open
+// bugs. "We could not reach the tracker" and "there is nothing left to fix" are
+// the same picture otherwise, and only one of them means the release is ready.
 export function ReleaseStatusCard({ release }: { release: Release }) {
-  const { data: status, isLoading } = useQuery({
+  const { data: status, isLoading, error } = useQuery({
     queryKey: ["status", release.id],
     queryFn: () => getReleaseStatus(release.id),
+    retry: false,
   });
 
-  if (isLoading || !status) {
+  if (isLoading) {
     return (
       <Group justify="center" py="xl">
         <Loader />
       </Group>
+    );
+  }
+
+  if (error || !status) {
+    return (
+      <Alert
+        color="red"
+        variant="light"
+        title="Cannot read this release's issues"
+        icon={<IconAlertTriangle size={18} />}
+      >
+        {apiErrorMessage(error, "The issue tracker could not be reached.")} Readiness
+        is decided by the ticketing system, so it cannot be shown while the tracker
+        is unavailable.
+      </Alert>
     );
   }
 
@@ -70,8 +92,8 @@ export function ReleaseStatusCard({ release }: { release: Release }) {
             <Table verticalSpacing={4} fz="sm">
               <Table.Tbody>
                 {status.open_bugs.map((b) => (
-                  <Table.Tr key={b.id}>
-                    <Table.Td fw={600}>{b.issue_key}</Table.Td>
+                  <Table.Tr key={b.key}>
+                    <Table.Td fw={600}>{b.key}</Table.Td>
                     <Table.Td>{b.summary}</Table.Td>
                     <Table.Td>
                       <Badge size="sm" color="red" variant="outline">{b.status}</Badge>
@@ -89,10 +111,22 @@ export function ReleaseStatusCard({ release }: { release: Release }) {
           {status.present_doc_types.length === 0 ? (
             <Text size="sm" c="dimmed">No documents uploaded.</Text>
           ) : (
+            /* Approved types are what readiness guards accept; a draft document
+               is shown greyed so it's clear it doesn't unblock a transition. */
             <Group gap={6} wrap="wrap">
-              {status.present_doc_types.map((t) => (
-                <Badge key={t} size="sm" variant="light" color="grape">{t}</Badge>
-              ))}
+              {status.present_doc_types.map((t) => {
+                const approved = (status.approved_doc_types ?? []).includes(t);
+                return (
+                  <Badge
+                    key={t}
+                    size="sm"
+                    variant="light"
+                    color={approved ? "grape" : "gray"}
+                  >
+                    {approved ? t : `${t} (draft)`}
+                  </Badge>
+                );
+              })}
             </Group>
           )}
         </Card>

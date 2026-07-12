@@ -43,8 +43,9 @@ class State:
 KNOWN_GUARDS = frozenset({"no_open_issues"})
 
 # Parameterised guard: ``document:<TypeName>`` requires that at least one document
-# of that type has been uploaded to the release before the transition is allowed.
-# The <TypeName> is one of the admin-configured document types.
+# of that type has been uploaded to the release *and approved* before the
+# transition is allowed. A DRAFT document does not satisfy it. The <TypeName> is
+# one of the admin-configured document types.
 DOCUMENT_GUARD_PREFIX = "document:"
 
 
@@ -65,7 +66,7 @@ _YAML_HEADER = (
     "# Exported from the database-backed workflow. Each transition may declare\n"
     "# `roles` (who may perform it) and `requires` (readiness guards:\n"
     "# no_open_issues, or document:<TypeName> to\n"
-    "# require an uploaded document of that type).\n"
+    "# require an approved document of that type).\n"
 )
 
 

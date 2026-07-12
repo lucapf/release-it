@@ -11,6 +11,8 @@ import httpx
 
 from app.integrations.trackers.base import (
     DONE,
+    IssueNotFound,
+    MembershipNotEnforceable,
     TrackerProjectNotFound,
     TrackerUnreachable,
     detail,
@@ -62,6 +64,16 @@ class GitHubTracker:
             if (m.get("title") or "").strip().lower() == wanted:
                 return m.get("number")
         return None
+
+    def _current_milestone(self, issue_url: str) -> str:
+        """The title of the milestone an issue currently sits in, lowercased
+        ("" when it is in none)."""
+        resp = httpx.get(issue_url, headers=self._headers(), timeout=30)
+        if resp.status_code == 404:
+            raise IssueNotFound(issue_url.rsplit("/", 1)[-1])
+        resp.raise_for_status()
+        milestone = resp.json().get("milestone") or {}
+        return (milestone.get("title") or "").strip().lower()
 
     def verify_project(self, repo: str) -> None:
         """Confirm the GitHub repository ``owner/repo`` exists via the repos API."""
@@ -118,14 +130,72 @@ class GitHubTracker:
         for i in resp.json():
             if "pull_request" in i:  # the issues API also returns PRs — skip them
                 continue
+            closed = i.get("state") == "closed"
             issues.append({
                 "key": f"#{i.get('number', '')}",
                 "type": _gh_type(i.get("labels", []) or []),
                 "summary": i.get("title", ""),
-                "status": DONE if i.get("state") == "closed" else "Open",
+                "status": DONE if closed else "Open",
+                "closed": closed,
                 "url": i.get("html_url", "") or "",
             })
         return issues
+
+    def set_membership(
+        self, key: str, *, mode: str, value: str, member: bool, repo: str = ""
+    ) -> None:
+        """Add/remove the criteria's label, or set/clear the criteria's milestone.
+
+        Both use GitHub's own membership verbs rather than rewriting the issue: the
+        labels sub-resource adds or deletes a single label, and the milestone is a
+        single field. Nothing else on the issue is touched.
+        """
+        if not repo:
+            raise ValueError("No GitHub repository configured for this product")
+        number = _issue_number(key)
+        if number is None:
+            raise IssueNotFound(key)
+        base = f"{self._cfg.base_url}/repos/{repo}/issues/{number}"
+
+        if mode == "label":
+            if member:
+                resp = httpx.post(f"{base}/labels", headers=self._headers(),
+                                  json={"labels": [value]}, timeout=30)
+            else:
+                resp = httpx.delete(f"{base}/labels/{value}", headers=self._headers(),
+                                    timeout=30)
+                # GitHub 404s when the label isn't on the issue. The ticket is
+                # already out of the release, which is what was asked for.
+                if resp.status_code == 404:
+                    return
+        elif mode == "milestone":
+            if member:
+                milestone = self._milestone_number(repo, value)
+                if milestone is None:
+                    raise MembershipNotEnforceable(
+                        f'this release selects its tickets by the milestone "{value}", '
+                        f"which does not exist in {repo}. Create the milestone in "
+                        "GitHub first, or give the release a label criteria."
+                    )
+                resp = httpx.patch(base, headers=self._headers(),
+                                   json={"milestone": milestone}, timeout=30)
+            else:
+                # Only clear the milestone if it is *this release's*. An issue
+                # sitting in some other milestone is already not in this release,
+                # and evicting it from that one would be a change nobody asked for.
+                if self._current_milestone(base) != value.strip().lower():
+                    return
+                resp = httpx.patch(base, headers=self._headers(),
+                                   json={"milestone": None}, timeout=30)
+        else:
+            raise MembershipNotEnforceable(
+                f"this release selects its tickets by {mode}, which cannot be "
+                "satisfied by editing a ticket."
+            )
+
+        if resp.status_code == 404:
+            raise IssueNotFound(key)
+        resp.raise_for_status()
 
     def fetch_issue(self, key: str, *, repo: str = "") -> dict | None:
         gh = self._cfg
@@ -147,11 +217,13 @@ class GitHubTracker:
         resp.raise_for_status()
         i = resp.json()
         labels = i.get("labels", []) or []
+        closed = i.get("state") == "closed"
         return detail(
             key=f"#{i.get('number', number)}",
             type=_gh_type(labels),
             summary=i.get("title", "") or "",
-            status=DONE if i.get("state") == "closed" else "Open",
+            status=DONE if closed else "Open",
+            closed=closed,
             url=i.get("html_url", "") or "",
             description=i.get("body") or "",
             assignee=(i.get("assignee") or {}).get("login", ""),

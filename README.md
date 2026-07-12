@@ -93,8 +93,10 @@ cd auth && pytest           # password hashing + JWT/JWKS round-trip
 
 ## Configuration highlights
 
-- `SOLUTION_ENABLED=false` disables the optional Solution feature (backend).
 - Backend JWT: `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL`, `JWT_ROLE_CLAIM`.
 - Auth: `AUTH_PRIVATE_KEY_PEM` (mount a stable RS256 key in production),
   `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_BOOTSTRAP_ADMIN_*`.
-- Integrations (stubbed unless enabled): `JIRA_*`, `GITLAB_*`, `AWX_*`.
+- Issue tracker: `TRACKER_PROVIDER` (`jira` | `github`), `JIRA_*`, `GITHUB_*`.
+- LLM: `LLM_PROVIDER` (`claude` | `ollama`), `CLAUDE_*`, `OLLAMA_*`.
+- Pipelines: `GITLAB_*`. Each integration calls its real backing service — there
+  is no stub, so a disabled integration raises rather than faking a result.

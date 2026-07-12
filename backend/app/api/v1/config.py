@@ -43,7 +43,6 @@ def get_config(conn: psycopg.Connection = Depends(get_conn)):
     cfg = appconfig.effective(conn)
     return ConfigView(
         tracker_provider=cfg.provider,
-        sync_interval_minutes=cfg.sync_interval_minutes,
         jira=JiraConfigView(
             enabled=cfg.jira.enabled,
             base_url=cfg.jira.base_url,
@@ -73,8 +72,6 @@ def update_config(body: ConfigUpdate, conn: psycopg.Connection = Depends(get_con
     # Non-exclusive fields: token fields are only persisted when a non-empty
     # value is supplied, so an omitted/blank token keeps the existing secret.
     values: dict[str, str] = {}
-    if body.sync_interval_minutes is not None:
-        values[appconfig.SYNC_INTERVAL_MINUTES] = str(body.sync_interval_minutes)
     if body.jira_base_url is not None:
         values[appconfig.JIRA_BASE_URL] = body.jira_base_url
     if body.jira_token:

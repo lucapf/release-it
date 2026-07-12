@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import psycopg
 
 from app.core.identity import Principal
@@ -24,10 +25,10 @@ from app.integrations import trackers
 from app.integrations.llm_chat import ActionRecord, Dispatch, ToolSpec
 from app.repositories import config as config_repo
 from app.repositories import documents as documents_repo
-from app.repositories import jira_issues as jira_repo
 from app.repositories import products as products_repo
 from app.repositories import releases as releases_repo
 from app.services import appconfig, audit, doc_render, release_ops
+from app.services import issues as issues_svc
 from app.services.release_status import compute_status, unmet_requirements
 from app.services.state_machine import StateMachine
 
@@ -58,11 +59,14 @@ def _release_brief(rel: dict) -> dict:
 
 
 def _issue_brief(issue: dict) -> dict:
+    """One ticket as reported to the model — from the tracker's live answer, so
+    `closed` is the tracker's current verdict and not a remembered one."""
     return {
-        "key": issue["issue_key"],
-        "type": issue["issue_type"],
+        "key": issue["key"],
+        "type": issue["type"],
         "summary": issue["summary"],
         "status": issue["status"],
+        "closed": bool(issue.get("closed")),
     }
 
 
@@ -155,6 +159,7 @@ def _status_report_for(ctx: ToolContext, rel: dict) -> dict:
         "open_issues": [_issue_brief(i.model_dump() if hasattr(i, "model_dump") else i)
                         for i in status.open_bugs],
         "present_document_types": status.present_doc_types,
+        "approved_document_types": status.approved_doc_types,
         "documents": [_document_brief(d) for d in documents],
         "blockers": _blockers(ctx, rel, status),
         "actions_performed": [_audit_brief(e) for e in history[:_HISTORY_LIMIT]],
@@ -212,15 +217,31 @@ def _project_status_report(ctx: ToolContext, args: dict) -> Any:
     for rel in rows:
         if rel["state"] in final_states:
             continue  # only releases still in flight
-        report = _status_report_for(ctx, rel)
+        # One tracker query per release, and one product's tracker being
+        # unreachable must not sink the whole report. That release is reported as
+        # *unknown* rather than dropped or, worse, as having no open issues —
+        # "we could not check" and "nothing is blocking it" are different answers.
+        try:
+            report = _status_report_for(ctx, rel)
+        except (trackers.TrackerError, httpx.HTTPError, ValueError) as exc:
+            report = {
+                "release_id": rel["id"],
+                "product_id": rel["product_id"],
+                "version": rel["version"],
+                "state": rel["state"],
+                "issues_unavailable": f"the ticketing system could not be queried: {exc}",
+                "is_ready": False,
+            }
         report["product_name"] = products.get(rel["product_id"], "")
         reports.append(report)
     return {"running_release_count": len(reports), "releases": reports}
 
 
 def _list_release_issues(ctx: ToolContext, args: dict) -> Any:
-    _require_release(ctx, args["release_id"])
-    return [_issue_brief(i) for i in jira_repo.list_by_release(ctx.conn, int(args["release_id"]))]
+    """The release's tickets, read from the ticketing system now — there is no
+    stored list to read instead."""
+    rel = _require_release(ctx, args["release_id"])
+    return [_issue_brief(i) for i in issues_svc.for_release(ctx.conn, ctx.cfg, rel)]
 
 
 def _list_documents(ctx: ToolContext, args: dict) -> Any:
@@ -288,44 +309,104 @@ def _create_release(ctx: ToolContext, args: dict) -> Any:
         product_id=int(args["product_id"]),
         version=str(args["version"]).strip(),
         short_description=str(args.get("short_description", "") or ""),
+        filter_mode=str(args.get("criteria_mode", "") or ""),
+        filter_value=str(args.get("criteria_value", "") or ""),
     )
-    return _release_brief(rel)
+    brief = _release_brief(rel)
+    brief["issues"] = [_issue_brief(i) for i in issues_svc.for_release(ctx.conn, ctx.cfg, rel)]
+    return brief
 
 
-def _tracker_query(cfg, release: dict, args: dict) -> tuple[str, str]:
-    """Resolve the tracker filter to (query, filter_kind), mirroring the release
-    API's sync semantics (GitHub milestone/label, Jira JQL/label/fixVersion)."""
-    label = (args.get("label") or "").strip()
-    jql = (args.get("jql") or "").strip()
-    milestone = (args.get("milestone") or "").strip()
-    if cfg.provider == "github":
-        if label:
-            return label, "label"
-        return (milestone or release["version"]), "milestone"
-    if jql:
-        return jql, "jql"
-    if label:
-        return f'labels = "{label}"', "jql"
-    return f'fixVersion = "{release["version"]}"', "jql"
-
-
-def _sync_release_issues(ctx: ToolContext, args: dict) -> Any:
+def _get_issue(ctx: ToolContext, args: dict) -> Any:
+    """One ticket in full, for an operator asking about a specific one: its key,
+    summary, description, status and the link to open it in the ticketing system."""
     rel = _require_release(ctx, args["release_id"])
-    query, filter_kind = _tracker_query(ctx.cfg, rel, args)
-    product = products_repo.get(ctx.conn, rel["product_id"]) or {}
-    repo_slug = product.get("tracker_repo", "") or ""
-    if ctx.cfg.provider == "github" and ctx.cfg.github.enabled and not repo_slug:
-        raise release_ops.ReleaseActionError(
-            400, "No GitHub repository configured for this product (set it on the product)."
-        )
-    try:
-        issues = trackers.fetch_issues(ctx.cfg, query, repo=repo_slug, filter_kind=filter_kind)
-    except ValueError as exc:
-        raise release_ops.ReleaseActionError(400, str(exc)) from exc
-    saved = jira_repo.replace_for_release(ctx.conn, rel["id"], issues)
+    issue = issues_svc.detail(ctx.conn, ctx.cfg, rel, str(args["key"]))
+    return {
+        "key": issue["key"],
+        "summary": issue["summary"],
+        "description": issue["description"],
+        "status": issue["status"],
+        "closed": issue["closed"],
+        # The operator's way to the ticket itself for anything this does not carry.
+        "url": issue["url"],
+        "type": issue["type"],
+        "assignee": issue["assignee"],
+        "priority": issue["priority"],
+        "labels": issue["labels"],
+    }
+
+
+def _set_membership(ctx: ToolContext, args: dict, *, member: bool) -> Any:
+    """Add/remove a ticket by editing it until it matches (or stops matching) the
+    release's criteria — see :func:`app.services.issues.set_membership`."""
+    rel = _require_release(ctx, args["release_id"])
+    result = issues_svc.set_membership(
+        ctx.conn, ctx.cfg, rel, str(args["key"]), member=member
+    )
     audit.record(ctx.conn, entity_type="release", entity_id=rel["id"],
-                 action="jira_sync", operator=ctx.principal.subject, new_value=query)
-    return {"synced": len(saved), "issues": [_issue_brief(i) for i in saved]}
+                 action="issue_added" if member else "issue_removed",
+                 operator=ctx.principal.subject,
+                 new_value=f'{result["key"]} ({result["criteria"]})')
+    return {
+        "key": result["key"],
+        "in_release": result["member"],
+        # What was actually done to the ticket, so the model reports the edit and
+        # not just "done" — the operator's ticket was changed in their tracker.
+        "edit": (f'{"added" if member else "removed"} to satisfy the release criteria '
+                 f'{result["criteria"]}'),
+        "release_now_contains": result["total"],
+        "issues": [_issue_brief(i) for i in result["issues"]],
+    }
+
+
+def _add_issue_to_release(ctx: ToolContext, args: dict) -> Any:
+    return _set_membership(ctx, args, member=True)
+
+
+def _remove_issue_from_release(ctx: ToolContext, args: dict) -> Any:
+    return _set_membership(ctx, args, member=False)
+
+
+def _search_issues(ctx: ToolContext, args: dict) -> Any:
+    """Preview a criteria against the tracker before it is bound to a release —
+    the tickets it would select, so the operator can confirm they are the right
+    ones (the UI shows the same list when a release is created)."""
+    query, issues = issues_svc.search(
+        ctx.conn, ctx.cfg, int(args["product_id"]),
+        str(args.get("criteria_mode", "") or ""),
+        str(args.get("criteria_value", "") or ""),
+    )
+    return {"query": query, "total": len(issues),
+            "issues": [_issue_brief(i) for i in issues]}
+
+
+def _set_release_criteria(ctx: ToolContext, args: dict) -> Any:
+    """Change which tickets a release contains, by changing its search criteria.
+
+    This is the only writable thing about a release's issues: the tickets
+    themselves live in the ticketing system and are never written from here.
+    """
+    rel = _require_release(ctx, args["release_id"])
+    try:
+        mode, value = issues_svc.validate_criteria(
+            ctx.cfg,
+            str(args.get("criteria_mode", "") or ""),
+            str(args.get("criteria_value", "") or ""),
+        )
+    except issues_svc.IssueCriteriaError as exc:
+        raise release_ops.ReleaseActionError(422, str(exc)) from exc
+
+    previous = issues_svc.get_criteria(ctx.conn, rel["id"])
+    issues_svc.save_criteria(ctx.conn, rel["id"], mode, value)
+    audit.record(ctx.conn, entity_type="release", entity_id=rel["id"],
+                 action="issue_criteria", operator=ctx.principal.subject,
+                 old_value=(f'{previous["filter_mode"]} = {previous["filter_value"]}'
+                            if previous else None),
+                 new_value=f"{mode} = {value}")
+    issues = issues_svc.for_release(ctx.conn, ctx.cfg, rel)
+    return {"criteria": f"{mode} = {value}", "total": len(issues),
+            "issues": [_issue_brief(i) for i in issues]}
 
 
 def _upload_document(ctx: ToolContext, args: dict) -> Any:
@@ -470,22 +551,68 @@ def build_tools() -> list[ToolSpec]:
               _get_generation_prompt,
               {"doc_type": {"type": "string", "description": "The document type to generate"}},
               ["doc_type"]),
-        _tool("sync_release_issues",
-              "Fetch a release's issues from the configured tracker (Jira/GitHub) and "
-              "cache them. Optionally filter by milestone, label or JQL.",
-              _sync_release_issues,
+        _tool("get_issue",
+              "Full detail of one ticket: its key, summary, description, status and "
+              "a link to the ticket in the ticketing system. Use this whenever the "
+              "operator asks about a specific ticket, and always give them the link.",
+              _get_issue,
               {"release_id": {"type": "integer"},
-               "milestone": {"type": "string"},
-               "label": {"type": "string"},
-               "jql": {"type": "string"}},
-              ["release_id"]),
+               "key": {"type": "string", "description": "Issue key, e.g. 'REL-1' or '#12'"}},
+              ["release_id", "key"]),
+        _tool("add_issue_to_release",
+              "Add a ticket to a release. A ticket belongs to a release when it "
+              "matches the release's search criteria, so this EDITS THE TICKET in the "
+              "ticketing system until it does — e.g. for a release whose criteria is "
+              "label = v0.0.1, it adds the label v0.0.1 to the ticket. Tell the "
+              "operator which edit was made.",
+              _add_issue_to_release,
+              {"release_id": {"type": "integer"},
+               "key": {"type": "string", "description": "Issue key, e.g. 'REL-1' or '#12'"}},
+              ["release_id", "key"]),
+        _tool("remove_issue_from_release",
+              "Remove a ticket from a release by editing it so it no longer matches "
+              "the release's criteria — e.g. for criteria label = v0.0.1, the label "
+              "v0.0.1 is removed from the ticket. The ticket itself is not deleted. "
+              "Tell the operator which edit was made.",
+              _remove_issue_from_release,
+              {"release_id": {"type": "integer"},
+               "key": {"type": "string", "description": "Issue key, e.g. 'REL-1' or '#12'"}},
+              ["release_id", "key"]),
+        _tool("search_issues",
+              "Preview the tickets a search criteria selects in the ticketing system, "
+              "before binding it to a release. Use this to show the operator what a "
+              "criteria finds and confirm it is the right work.",
+              _search_issues,
+              {"product_id": {"type": "integer"},
+               "criteria_mode": {"type": "string",
+                                 "description": "GitHub: 'milestone' or 'label'. Jira: 'label' or 'jql'."},
+               "criteria_value": {"type": "string",
+                                  "description": "What to search for, e.g. 'v0.0.1'"}},
+              ["product_id", "criteria_mode", "criteria_value"]),
+        _tool("set_release_criteria",
+              "Change which tickets a release contains, by changing its search "
+              "criteria. Returns the tickets the new criteria selects.",
+              _set_release_criteria,
+              {"release_id": {"type": "integer"},
+               "criteria_mode": {"type": "string",
+                                 "description": "GitHub: 'milestone' or 'label'. Jira: 'label' or 'jql'."},
+               "criteria_value": {"type": "string"}},
+              ["release_id", "criteria_mode", "criteria_value"]),
         _tool("create_release",
-              "Create a new release for a product in the initial workflow state.",
+              "Create a new release for a product in the initial workflow state. The "
+              "search criteria is required: it is what says which tickets the release "
+              "contains (e.g. label = v0.0.1), and every later question about its "
+              "issues is put to the ticketing system with it. Preview the tickets with "
+              "search_issues and confirm them with the operator first.",
               _create_release,
               {"product_id": {"type": "integer"},
                "version": {"type": "string"},
-               "short_description": {"type": "string"}},
-              ["product_id", "version"]),
+               "short_description": {"type": "string"},
+               "criteria_mode": {"type": "string",
+                                 "description": "GitHub: 'milestone' or 'label'. Jira: 'label' or 'jql'."},
+               "criteria_value": {"type": "string",
+                                  "description": "What to search for, e.g. 'v0.0.1'"}},
+              ["product_id", "version", "criteria_mode", "criteria_value"]),
         _tool("upload_document",
               "Attach a text/Markdown document to a release. Provide the document "
               "body as `content`. `doc_type` must be one of list_document_types.",
@@ -513,8 +640,11 @@ def build_tools() -> list[ToolSpec]:
 
 # Tools that change the system (everything else only reads it). Drives the
 # read/action badge on the "Assistant actions" configuration page.
+# Note that add/remove_issue_to/from_release are writes to the *ticketing system*,
+# not just to Release-It: they edit the operator's tickets.
 _WRITE_TOOLS = {"create_release", "upload_document", "transition_release",
-                "sync_release_issues", "approve_document"}
+                "set_release_criteria", "approve_document",
+                "add_issue_to_release", "remove_issue_from_release"}
 
 
 def describe_actions() -> list[dict]:
@@ -545,8 +675,8 @@ PROMPT_TEMPLATES: list[dict] = [
             "follow. If the type does not exist or is set to manual, tell the operator "
             "exactly why it cannot be generated and stop. Otherwise follow that "
             "document type's generation prompt to build the document in Markdown — "
-            "syncing the release's issues from the tracker first if the prompt relies on "
-            "them, and referencing each issue by its key. Once generated, upload it to "
+            "reading the release's issues from the ticketing system if the prompt relies "
+            "on them, and referencing each issue by its key. Once generated, upload it to "
             "the release as a document of that type, titled after the document and "
             "version."
         ),

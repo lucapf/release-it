@@ -13,7 +13,6 @@ import {
   Loader,
   Modal,
   MultiSelect,
-  NumberInput,
   PasswordInput,
   SegmentedControl,
   Select,
@@ -53,6 +52,7 @@ import {
   DocumentType,
   DocumentTypeKind,
   getOverview,
+  createProduct,
   updateProduct,
   deleteProduct,
   listReleases,
@@ -448,7 +448,6 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
   const { data: cfg, isLoading } = useQuery({ queryKey: ["config"], queryFn: getConfig });
 
   const [provider, setProvider] = useState<"jira" | "github">("jira");
-  const [syncMinutes, setSyncMinutes] = useState<number>(10);
   const [jiraEnabled, setJiraEnabled] = useState(false);
   const [jiraUrl, setJiraUrl] = useState("");
   const [jiraToken, setJiraToken] = useState("");
@@ -460,7 +459,6 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
   useEffect(() => {
     if (!cfg) return;
     setProvider(cfg.tracker_provider);
-    setSyncMinutes(cfg.sync_interval_minutes);
     setJiraEnabled(cfg.jira.enabled);
     setJiraUrl(cfg.jira.base_url);
     setGhEnabled(cfg.github.enabled);
@@ -471,7 +469,6 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
     mutationFn: () => {
       const body: ConfigUpdate = {
         tracker_provider: provider,
-        sync_interval_minutes: syncMinutes,
         jira_enabled: jiraEnabled,
         jira_base_url: jiraUrl,
         github_enabled: ghEnabled,
@@ -519,19 +516,8 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
         mb="lg"
       />
 
-      <NumberInput
-        label="Scheduled sync (minutes)"
-        description="Every running release's issues are re-synced from the tracker on this schedule. Set 0 to disable. Default: every 10 minutes."
-        min={0}
-        step={1}
-        allowDecimal={false}
-        value={syncMinutes}
-        onChange={(v) => setSyncMinutes(typeof v === "number" ? v : 10)}
-        disabled={!canEdit}
-        maw={280}
-        mb="lg"
-      />
-
+      {/* No sync schedule: a release's issues are read from the tracker at the
+          moment they are shown, so there is no stored copy to keep in step. */}
       <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
         <Stack gap="sm">
           <Group justify="space-between">
@@ -895,47 +881,65 @@ function AssistantActionsSection() {
 }
 
 // --- Projects: per-project settings + lifecycle ----------------------------
-function EditProjectModal({
+// One form for both jobs: a project is the same two fields whether it is being
+// created or edited. `project` is the one being edited, or null to create a new one.
+function ProjectModal({
+  opened,
   project,
   onClose,
 }: {
+  opened: boolean;
   project: ProductOverview | null;
   onClose: () => void;
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [repo, setRepo] = useState("");
+
+  // Seed the fields each time the modal opens: the edited project's values, or
+  // blanks for a new one (so a previous edit never leaks into a create).
   useEffect(() => {
-    if (project) {
-      setName(project.name);
-      setRepo(project.tracker_repo);
-    }
-  }, [project]);
+    if (!opened) return;
+    setName(project?.name ?? "");
+    setRepo(project?.tracker_repo ?? "");
+  }, [opened, project]);
 
   const save = useMutation({
     mutationFn: () =>
-      updateProduct(project!.id, { name: name.trim(), tracker_repo: repo.trim() }),
+      project
+        ? updateProduct(project.id, { name: name.trim(), tracker_repo: repo.trim() })
+        : createProduct(name.trim(), repo.trim()),
     onSuccess: (p) => {
       qc.setQueryData(["product", p.id], p);
       qc.invalidateQueries({ queryKey: ["overview"] });
-      notifications.show({ message: "Project updated", color: "teal" });
+      notifications.show({
+        message: project ? "Project updated" : "Project created",
+        color: "teal",
+      });
       onClose();
     },
-    onError: (e: any) => notifyApiError(e, "Could not update project"),
+    onError: (e: any) =>
+      notifyApiError(e, project ? "Could not update project" : "Could not create project"),
   });
 
   return (
-    <Modal opened={!!project} onClose={onClose} title="Edit project" size="md">
+    <Modal
+      opened={opened}
+      onClose={onClose}
+      title={project ? "Edit project" : "New project"}
+      size="md"
+    >
       <Stack gap="md">
         <TextInput
           label="Project name"
+          placeholder="e.g. Payments service"
           data-autofocus
           value={name}
           onChange={(e) => setName(e.currentTarget.value)}
         />
         <TextInput
           label="Issue tracker project"
-          description="GitHub owner/repo (or tracker project key) this project's issues live in"
+          description="GitHub owner/repo (or tracker project key) this project's issues live in. Verified against the configured tracker when set."
           placeholder="owner/repo"
           value={repo}
           onChange={(e) => setRepo(e.currentTarget.value)}
@@ -943,7 +947,7 @@ function EditProjectModal({
         <Group justify="flex-end">
           <Button variant="default" onClick={onClose}>Cancel</Button>
           <Button disabled={!name.trim()} loading={save.isPending} onClick={() => save.mutate()}>
-            Save changes
+            {project ? "Save changes" : "Create project"}
           </Button>
         </Group>
       </Stack>
@@ -975,7 +979,7 @@ function DeleteProjectModal({
         <Alert color="red" variant="light">
           This permanently deletes <b>{project?.name}</b> and its{" "}
           {project?.release_count ?? 0} release(s), including all checks, documents
-          and synced issues. This cannot be undone.
+          and issue criteria. This cannot be undone.
         </Alert>
         <Group justify="flex-end">
           <Button variant="default" onClick={onClose}>Cancel</Button>
@@ -1083,15 +1087,27 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
     queryFn: getOverview,
   });
   const [editing, setEditing] = useState<ProductOverview | null>(null);
+  const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<ProductOverview | null>(null);
   const [managing, setManaging] = useState<ProductOverview | null>(null);
 
   return (
     <Card withBorder radius="md" padding="lg">
-      <Title order={4} mb={4}>Projects</Title>
+      <Group justify="space-between" align="flex-start" mb={4}>
+        <Title order={4}>Projects</Title>
+        {canEdit && (
+          <Button
+            size="sm"
+            leftSection={<IconPlus size={16} />}
+            onClick={() => setCreating(true)}
+          >
+            New project
+          </Button>
+        )}
+      </Group>
       <Text c="dimmed" size="sm" mb="md">
-        Manage each project's standard configuration — its name and the issue-tracker
-        project its issues are synced from — or remove a project. {canEdit
+        Create a project, and manage each one's standard configuration — its name and
+        the issue-tracker project its issues are read from — or remove it. {canEdit
           ? "Use the releases icon (or click a project's release count) to manage and delete its releases."
           : ""}
       </Text>
@@ -1099,7 +1115,9 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
       {isLoading ? (
         <Loader />
       ) : projects.length === 0 ? (
-        <Text c="dimmed" size="sm">No projects yet.</Text>
+        <Text c="dimmed" size="sm">
+          {canEdit ? "No projects yet — create the first one above." : "No projects yet."}
+        </Text>
       ) : (
         <Table.ScrollContainer minWidth={520}>
           <Table verticalSpacing="sm" highlightOnHover>
@@ -1176,7 +1194,11 @@ function ProjectsSection({ canEdit, canDelete }: { canEdit: boolean; canDelete: 
         </Table.ScrollContainer>
       )}
 
-      <EditProjectModal project={editing} onClose={() => setEditing(null)} />
+      <ProjectModal
+        opened={creating || !!editing}
+        project={editing}
+        onClose={() => { setCreating(false); setEditing(null); }}
+      />
       <DeleteProjectModal project={deleting} onClose={() => setDeleting(null)} />
       <ManageReleasesModal project={managing} onClose={() => setManaging(null)} />
     </Card>
@@ -1251,7 +1273,7 @@ export function WorkflowPage() {
 export function TrackerPage() {
   const { hasRole } = useAuth();
   return (
-    <ConfigPage title="Issue tracker" description="Configure tracker access for syncing issues.">
+    <ConfigPage title="Issue tracker" description="Configure how Release-It reaches your ticketing system.">
       <TrackerSection canEdit={hasRole("Administrator")} />
     </ConfigPage>
   );

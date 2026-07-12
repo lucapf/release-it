@@ -22,8 +22,6 @@ JIRA_TOKEN = "jira_token"
 GITHUB_ENABLED = "github_enabled"
 GITHUB_BASE_URL = "github_base_url"
 GITHUB_TOKEN = "github_token"
-# Scheduled issue sync interval, in minutes ("0" disables the scheduler).
-SYNC_INTERVAL_MINUTES = "sync_interval_minutes"
 # NOTE: the GitHub repository is configured per-product (Product.tracker_repo),
 # not as a global app_config key.
 
@@ -75,8 +73,6 @@ class EffectiveConfig:
     jira: TrackerConfig
     github: TrackerConfig
     llm: LLMConfig
-    # Scheduled issue sync: every N minutes; 0 (or negative) disables it.
-    sync_interval_minutes: int = 10
 
 
 def effective(conn: psycopg.Connection) -> EffectiveConfig:
@@ -87,12 +83,6 @@ def effective(conn: psycopg.Connection) -> EffectiveConfig:
 
     def b(key: str, default: bool) -> bool:
         return _as_bool(db[key]) if key in db and db[key] != "" else default
-
-    def i(key: str, default: int) -> int:
-        try:
-            return int(db[key]) if key in db and db[key] != "" else default
-        except ValueError:
-            return default
 
     provider = s(TRACKER_PROVIDER, settings.tracker_provider).lower()
     if provider not in {"jira", "github"}:
@@ -117,7 +107,6 @@ def effective(conn: psycopg.Connection) -> EffectiveConfig:
             ollama_base_url=s(OLLAMA_BASE_URL, settings.ollama_base_url),
             ollama_model=s(OLLAMA_MODEL, settings.ollama_model),
         ),
-        sync_interval_minutes=i(SYNC_INTERVAL_MINUTES, settings.sync_interval_minutes),
     )
 
 

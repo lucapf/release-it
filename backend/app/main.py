@@ -1,7 +1,6 @@
 """ReleaseIT backend — FastAPI application entrypoint."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -21,55 +20,19 @@ from app.api.v1 import (
     document,
     product,
     release,
-    solution,
     workflow,
 )
 from app.core.config import settings
 from app.db.migrate import apply_pending
 from app.db.pool import close_pool, connection, open_pool
-from app.services import appconfig, issue_sync
 from app.services import workflow as workflow_svc
 
 log = logging.getLogger("releaseit.main")
 
-# When the scheduled sync is disabled (interval <= 0), re-read the configured
-# interval this often so re-enabling it on the configuration page takes effect
-# without a restart.
-_SYNC_DISABLED_POLL_SECONDS = 60
 
-
-def _run_sync_cycle(app: FastAPI) -> int:
-    """One scheduler cycle (runs in a worker thread — psycopg calls block)."""
-    with connection() as conn:
-        return issue_sync.sync_all(conn, app.state.state_machine)
-
-
-async def _issue_sync_loop(app: FastAPI) -> None:
-    """Re-sync every running release's issues on the configured schedule
-    (``sync_interval_minutes``, default 10; 0 disables). The interval is
-    re-read from the runtime configuration each cycle, so changes made on the
-    configuration page apply without a restart."""
-    while True:
-        try:
-            with connection() as conn:
-                minutes = appconfig.effective(conn).sync_interval_minutes
-        except Exception:
-            log.exception("issue-sync scheduler could not read the configuration")
-            minutes = 0
-
-        if minutes <= 0:
-            await asyncio.sleep(_SYNC_DISABLED_POLL_SECONDS)
-            continue
-
-        try:
-            changed = await asyncio.to_thread(_run_sync_cycle, app)
-            if changed:
-                log.info("scheduled issue sync updated %d release(s)", changed)
-        except Exception:
-            log.exception("scheduled issue sync cycle failed")
-        await asyncio.sleep(minutes * 60)
-
-
+# There is no issue-sync scheduler. A release's issues are read from the
+# ticketing system at the moment they are asked for, so there is no cached copy
+# for a background job to keep in step with the tracker.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     open_pool()
@@ -78,11 +41,9 @@ async def lifespan(app: FastAPI):
     # migration) and editable at runtime. Load it into app state at startup.
     with connection() as conn:
         app.state.state_machine = workflow_svc.from_db(conn)
-    sync_task = asyncio.create_task(_issue_sync_loop(app))
     try:
         yield
     finally:
-        sync_task.cancel()
         close_pool()
 
 
@@ -141,10 +102,6 @@ app.include_router(document.router, prefix="/api/v1/release", tags=["document"])
 app.include_router(workflow.router, prefix="/api/v1/workflow", tags=["workflow"])
 app.include_router(config.router, prefix="/api/v1/config", tags=["config"])
 app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
-
-# Solution management is optional (docs: SOLUTION_ENABLED).
-if settings.solution_enabled:
-    app.include_router(solution.router, prefix="/api/v1/solution", tags=["solution"])
 
 
 @app.get("/health", tags=["meta"])

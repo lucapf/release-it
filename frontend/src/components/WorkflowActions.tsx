@@ -17,13 +17,21 @@ function unmetRequirements(
   const reasons: string[] = [];
   if (requires.includes("no_open_issues") && status.open_bug_count > 0)
     reasons.push(`${status.open_bug_count} open issue(s) must be closed`);
-  // Parameterised guard: document:<TypeName> needs an uploaded document of that type.
+  // Parameterised guard: document:<TypeName> needs an *approved* document of that
+  // type — an uploaded but still-draft document does not satisfy it.
   const present = new Set(status.present_doc_types ?? []);
+  const approved = new Set(status.approved_doc_types ?? []);
   requires
     .filter((r) => r.startsWith("document:"))
     .map((r) => r.slice("document:".length))
-    .filter((docType) => !present.has(docType))
-    .forEach((docType) => reasons.push(`missing document: ${docType}`));
+    .filter((docType) => !approved.has(docType))
+    .forEach((docType) =>
+      reasons.push(
+        present.has(docType)
+          ? `document not approved: ${docType}`
+          : `missing document: ${docType}`,
+      ),
+    );
   return reasons;
 }
 

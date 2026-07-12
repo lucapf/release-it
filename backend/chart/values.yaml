@@ -3,7 +3,6 @@ image: docker.io/library/releaseit-backend:latest
 # from a remote registry. Set to Always for real registries.
 pullPolicy: IfNotPresent
 replicas: 1
-solutionEnabled: true
 # Disable auth for local development / tests only.
 authEnabled: true
 # The release workflow is database-backed: it is seeded by the backend's
@@ -17,8 +16,9 @@ maxDocumentSizeMb: 10
 # Release workflow / readiness rules.
 # Roles allowed to perform a transition that doesn't set its own `roles` in states.yaml.
 defaultTransitionRoles: "QA Manager,Release Manager,Administrator"
-# Jira issue statuses that count as "closed". Everything else is open.
-closedBugStatuses: "Done"
+# NOTE: there is deliberately no "which issue statuses count as closed" setting.
+# The tracker owns that (Jira's statusCategory, GitHub/GitLab's issue state), and
+# declaring it here again produced a definition that silently disagreed with it.
 
 dbPool:
   minSize: 1
@@ -70,10 +70,6 @@ integrations:
     repo: ""
     token: ""
   gitlab:
-    enabled: false
-    baseUrl: ""
-    token: ""
-  awx:
     enabled: false
     baseUrl: ""
     token: ""

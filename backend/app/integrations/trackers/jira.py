@@ -10,6 +10,8 @@ import logging
 import httpx
 
 from app.integrations.trackers.base import (
+    IssueNotFound,
+    MembershipNotEnforceable,
     TrackerProjectNotFound,
     TrackerUnreachable,
     detail,
@@ -22,6 +24,29 @@ log = logging.getLogger("releaseit.tracker.jira")
 def _name(field: dict | None) -> str:
     """The ``name`` of a nested Jira object (issuetype, status, priority)."""
     return (field or {}).get("name", "") or ""
+
+
+def _closed(status: dict | None) -> bool:
+    """Whether Jira considers this issue finished.
+
+    Jira groups every status into one of three *status categories* — ``new``,
+    ``indeterminate``, ``done`` — and the category is what carries the meaning;
+    the status *name* is just a label a project admin chose. Reading the category
+    is what lets a project call its done-status "Resolved" or "Shipped" without
+    Release-It having to be told about it.
+
+    A payload with no category at all (an old server, or an incomplete stub) is
+    reported as *not* closed: a guarded transition must not be unblocked by an
+    issue we cannot prove is finished.
+    """
+    category = ((status or {}).get("statusCategory") or {}).get("key", "")
+    if not category:
+        log.warning(
+            "Jira status %r carries no statusCategory — treating the issue as open",
+            _name(status) or "?",
+        )
+        return False
+    return category.lower() == "done"
 
 
 def _person(field: dict | None) -> str:
@@ -98,9 +123,39 @@ class JiraTracker:
                 "type": _name(fields.get("issuetype")) or "Task",
                 "summary": fields.get("summary", "") or "",
                 "status": _name(fields.get("status")),
+                "closed": _closed(fields.get("status")),
                 "url": self._browse_url(key),
             })
         return issues
+
+    def set_membership(
+        self, key: str, *, mode: str, value: str, member: bool, repo: str = ""
+    ) -> None:
+        """Add/remove the criteria's label on a Jira issue.
+
+        Jira's own edit verb for this is ``update.labels: [{"add": ...}]`` — a
+        *delta*, not a rewrite of the label list. That matters: reading the labels,
+        appending one and PUTting the whole array back would silently drop any
+        label added by someone else in between, and quietly evict a ticket from
+        another release whose criteria is that label.
+        """
+        if mode != "label":
+            raise MembershipNotEnforceable(
+                f"this release selects its tickets by {mode}, and a {mode} criteria "
+                "cannot be satisfied by editing a ticket. Give the release a label "
+                "criteria (e.g. label = v0.0.1) to add and remove tickets this way, "
+                "or edit the ticket in Jira directly."
+            )
+        op = "add" if member else "remove"
+        resp = httpx.put(
+            f"{self._cfg.base_url}/rest/api/2/issue/{key}",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json={"update": {"labels": [{op: value}]}},
+            timeout=30,
+        )
+        if resp.status_code == 404:
+            raise IssueNotFound(key)
+        resp.raise_for_status()
 
     def fetch_issue(self, key: str, *, repo: str = "") -> dict | None:
         if not self._configured() or not key:
@@ -120,6 +175,7 @@ class JiraTracker:
             type=_name(fields.get("issuetype")) or "Task",
             summary=fields.get("summary", "") or "",
             status=_name(fields.get("status")),
+            closed=_closed(fields.get("status")),
             url=self._browse_url(issue.get("key", key)),
             description=_description(fields.get("description")),
             assignee=_person(fields.get("assignee")),

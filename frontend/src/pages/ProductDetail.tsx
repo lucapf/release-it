@@ -31,6 +31,7 @@ import {
   IconCheck,
   IconChevronDown,
   IconChevronRight,
+  IconCircleMinus,
   IconClipboardText,
   IconDownload,
   IconExternalLink,
@@ -42,6 +43,8 @@ import {
   IconHistory,
   IconListDetails,
   IconMarkdown,
+  IconPlus,
+  IconRefresh,
   IconRocket,
   IconTrash,
   IconUpload,
@@ -62,12 +65,17 @@ import {
   setDocumentStatus,
   listDocumentTypes,
   DocumentMeta,
-  listJiraIssues,
+  listReleaseIssues,
+  searchIssues,
+  addIssueToRelease,
+  removeIssueFromRelease,
   getIssueDetail,
-  syncJira,
-  getSyncFilter,
-  saveSyncFilter,
+  getIssueFilter,
+  saveIssueFilter,
   getReleaseHistory,
+  Issue,
+  IssueFilter,
+  IssueFilterMode,
   Product,
   Release,
   AuditEntry,
@@ -127,8 +135,9 @@ function ReleaseSelector({
 }
 
 // --- Total bugs in the viewed release (live from the active tracker) --------
-// The tracker is filtered by the release label "v<major>.<minor>.<patch>"
-// (e.g. v0.0.1) derived from the release version.
+// Counted over the same issue set the readiness gate uses — the release's saved
+// sync filter, or the provider's native release grouping. The resolved filter
+// comes back on the response so the tooltip can show *which* issues were counted.
 function ReleaseBugTotal({ releaseId }: { releaseId: number }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["bug-count", releaseId],
@@ -154,46 +163,251 @@ function ReleaseBugTotal({ releaseId }: { releaseId: number }) {
     );
   }
   return (
-    <Tooltip label={`Tracker issues labelled "${data.label}" with type bug`}>
+    <Tooltip label={`Bugs among the tracker issues matching ${data.filter}`}>
       <Badge
         variant="light"
         color={data.total_bugs > 0 ? "red" : "teal"}
         leftSection={<IconBug size={12} />}
       >
-        Total bugs in {data.label}: {data.total_bugs}
+        Total bugs: {data.total_bugs}
       </Badge>
     </Tooltip>
   );
 }
 
-// --- New release control (lives alongside the release selector) ------------
+// --- Choosing which tickets a release contains -----------------------------
+// A release is defined by a search criteria (e.g. label = v0.0.1) run against the
+// ticketing system. Release-It stores the criteria and nothing else: the tickets
+// themselves are read from the tracker every time they are shown, so this is the
+// one thing an operator has to get right.
+const MODE_OPTIONS: Record<"jira" | "github", { value: IssueFilterMode; label: string }[]> = {
+  github: [
+    { value: "milestone", label: "Milestone" },
+    { value: "label", label: "Label" },
+  ],
+  jira: [
+    { value: "label", label: "Label" },
+    { value: "jql", label: "Custom JQL" },
+  ],
+};
+
+const VALUE_HINT: Record<IssueFilterMode, { label: string; placeholder: string }> = {
+  milestone: { label: "Milestone", placeholder: "e.g. 0.1.0" },
+  label: { label: "Label", placeholder: "e.g. v0.0.1" },
+  jql: { label: "JQL query", placeholder: 'project = REL AND fixVersion = "1.2.0"' },
+};
+
+/** The criteria form: which field to search on, and what to search for. */
+function CriteriaFields({
+  provider,
+  mode,
+  value,
+  onModeChange,
+  onValueChange,
+}: {
+  provider: "jira" | "github";
+  mode: IssueFilterMode;
+  value: string;
+  onModeChange: (m: IssueFilterMode) => void;
+  onValueChange: (v: string) => void;
+}) {
+  const hint = VALUE_HINT[mode];
+  return (
+    <Group align="flex-end" gap="sm">
+      <Select
+        label="Find tickets by"
+        data={MODE_OPTIONS[provider]}
+        value={mode}
+        onChange={(m) => m && onModeChange(m as IssueFilterMode)}
+        maw={160}
+        allowDeselect={false}
+      />
+      <TextInput
+        label={hint.label}
+        placeholder={hint.placeholder}
+        value={value}
+        onChange={(e) => onValueChange(e.currentTarget.value)}
+        style={{ flex: 1 }}
+      />
+    </Group>
+  );
+}
+
+/** The tickets a criteria selects, exactly as the tracker returned them. */
+function IssueList({ issues }: { issues: Issue[] }) {
+  return (
+    <Table.ScrollContainer minWidth={480}>
+      <Table striped highlightOnHover fz="sm">
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th>Key</Table.Th>
+            <Table.Th>Type</Table.Th>
+            <Table.Th>Summary</Table.Th>
+            <Table.Th>Status</Table.Th>
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {issues.map((i) => (
+            <Table.Tr key={i.key}>
+              <Table.Td fw={600}>{i.key}</Table.Td>
+              <Table.Td><Badge size="sm" variant="light" color="gray">{i.type}</Badge></Table.Td>
+              <Table.Td>{i.summary}</Table.Td>
+              <Table.Td>
+                <Badge size="sm" variant="light" color={issueStatusColor(i.status)}>
+                  {i.status}
+                </Badge>
+              </Table.Td>
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </Table.ScrollContainer>
+  );
+}
+
+// --- New release (version + criteria, with the tickets shown before creating) --
 function NewReleaseControl({ productId }: { productId: number }) {
   const qc = useQueryClient();
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: getConfig });
+  const provider = cfg?.tracker_provider ?? "jira";
+
+  const [opened, setOpened] = useState(false);
   const [version, setVersion] = useState("1.0.0");
+  const [mode, setMode] = useState<IssueFilterMode>(provider === "github" ? "milestone" : "label");
+  const [value, setValue] = useState("");
+
+  // The criteria the previewed tickets belong to. Editing the criteria after a
+  // search invalidates the preview, so an operator can never create a release
+  // against tickets they were not actually shown.
+  const [previewed, setPreviewed] = useState<string | null>(null);
+  const criteriaKey = `${mode}\u0000${value.trim()}`;
+  const isPreviewCurrent = previewed === criteriaKey;
+
+  const reset = () => {
+    setOpened(false);
+    setVersion("1.0.0");
+    setMode(provider === "github" ? "milestone" : "label");
+    setValue("");
+    setPreviewed(null);
+    search.reset();
+  };
+
+  const search = useMutation({
+    mutationFn: () => searchIssues(productId, mode, value.trim()),
+    onSuccess: () => setPreviewed(criteriaKey),
+    onError: (e: any) => {
+      setPreviewed(null);
+      notifyApiError(e, "Could not search the ticketing system");
+    },
+  });
 
   const add = useMutation({
-    mutationFn: () => createRelease(productId, version),
+    mutationFn: () => createRelease(productId, version.trim(), { mode, value: value.trim() } as IssueFilter),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["releases", productId] });
       qc.invalidateQueries({ queryKey: ["overview"] });
       notifications.show({ message: "Release created", color: "teal" });
+      reset();
     },
     onError: (e: any) => notifyApiError(e, "Could not create release"),
   });
 
+  const found = search.data;
+
   return (
-    <Group gap="xs" align="flex-end">
-      <TextInput
-        label="New release version"
-        value={version}
-        onChange={(e) => setVersion(e.currentTarget.value)}
-        placeholder="1.2.0"
-        maw={160}
-      />
-      <Button loading={add.isPending} onClick={() => add.mutate()}>
-        Add release
-      </Button>
-    </Group>
+    <>
+      {/* Wrapped in a Group: as a direct child of the card's Stack the button
+          would stretch to the full card width. */}
+      <Group>
+        <Button
+          size="sm"
+          w="fit-content"
+          leftSection={<IconRocket size={16} />}
+          onClick={() => setOpened(true)}
+        >
+          New release
+        </Button>
+      </Group>
+
+      <Modal opened={opened} onClose={reset} title="New release" size="lg">
+        <Stack gap="md">
+          <TextInput
+            label="Version"
+            placeholder="1.2.0"
+            value={version}
+            onChange={(e) => setVersion(e.currentTarget.value)}
+            maw={200}
+          />
+
+          <div>
+            <Text size="sm" fw={600}>Which tickets does this release contain?</Text>
+            <Text size="xs" c="dimmed" mb="xs">
+              The criteria is stored with the release. Its issues — and whether it is
+              ready to ship — are read from {provider === "github" ? "GitHub" : "Jira"} with
+              it, every time they are asked for.
+            </Text>
+            <CriteriaFields
+              provider={provider}
+              mode={mode}
+              value={value}
+              onModeChange={setMode}
+              onValueChange={setValue}
+            />
+          </div>
+
+          <Group>
+            <Button
+              variant="light"
+              leftSection={<IconListDetails size={16} />}
+              disabled={!value.trim()}
+              loading={search.isPending}
+              onClick={() => search.mutate()}
+            >
+              Find tickets
+            </Button>
+            {found && isPreviewCurrent && (
+              <Text size="sm" c="dimmed">
+                {found.total} ticket(s) · {found.bug_count} bug(s) · matching{" "}
+                <Text span ff="monospace" size="xs">{found.query}</Text>
+              </Text>
+            )}
+          </Group>
+
+          {search.isError && (
+            <Alert color="red" variant="light">
+              {apiErrorMessage(search.error, "The ticketing system could not be searched.")}
+            </Alert>
+          )}
+
+          {found && isPreviewCurrent && (
+            found.total === 0 ? (
+              <Alert color="orange" variant="light">
+                No tickets match this criteria. You can still create the release, but it
+                will contain no work until the criteria matches something.
+              </Alert>
+            ) : (
+              <IssueList issues={found.issues} />
+            )
+          )}
+
+          <Group justify="flex-end">
+            <Button variant="subtle" color="gray" onClick={reset}>Cancel</Button>
+            <Tooltip
+              label="Search for the tickets first, so you can see what this release will contain"
+              disabled={isPreviewCurrent}
+            >
+              <Button
+                disabled={!version.trim() || !isPreviewCurrent}
+                loading={add.isPending}
+                onClick={() => add.mutate()}
+              >
+                Create release
+              </Button>
+            </Tooltip>
+          </Group>
+        </Stack>
+      </Modal>
+    </>
   );
 }
 
@@ -607,9 +821,9 @@ function DocumentsTab({ releaseId }: { releaseId: number }) {
 }
 
 // --- Issues tab (tracker-aware: Jira or GitHub) ----------------------------
-// One day, in ms — releases not yet Approved go "stale" once their last sync
-// is older than this and the date is highlighted.
-const STALE_MS = 24 * 60 * 60 * 1000;
+// The issues shown here are read from the ticketing system on every render, so
+// there is no "last synced" time and nothing can go stale: what you see is what
+// the tracker says now.
 
 /** A labelled line in the detail modal; renders nothing when the tracker has
  *  no value for the field (GitHub has no priority, issues may be unassigned). */
@@ -627,8 +841,8 @@ function DetailRow({ label, children }: { label: string; children: ReactNode }) 
 
 const formatIssueDate = (raw: string) => (raw ? new Date(raw).toLocaleString() : "");
 
-/** The issue's current state, read from the tracker when the operator asks for
- *  it — not from the synced cache, which only holds the columns the table shows. */
+/** One issue in full (description, people, timestamps) — more than the list
+ *  needs, so it is fetched only when the operator opens it. */
 function IssueDetailModal({
   releaseId,
   issueKey,
@@ -713,7 +927,7 @@ function IssueDetailModal({
   );
 }
 
-function JiraTab({
+function IssuesTab({
   releaseId,
   product,
   release,
@@ -723,12 +937,24 @@ function JiraTab({
   release: Release | null;
 }) {
   const qc = useQueryClient();
-  const key = ["jira", releaseId];
-  const { data: issues = [] } = useQuery({ queryKey: key, queryFn: () => listJiraIssues(releaseId) });
   const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: getConfig });
-  const { data: savedFilter } = useQuery({
-    queryKey: ["sync-filter", releaseId],
-    queryFn: () => getSyncFilter(releaseId),
+  const { data: criteria } = useQuery({
+    queryKey: ["issue-filter", releaseId],
+    queryFn: () => getIssueFilter(releaseId),
+  });
+
+  // The tickets themselves: straight from the tracker, every time. A failure here
+  // is shown as a failure — an empty table would read as "this release has no
+  // work left", which is the one thing it must never say by accident.
+  const {
+    data: issues = [],
+    isFetching,
+    error,
+    refetch,
+  } = useQuery({
+    queryKey: ["issues", releaseId],
+    queryFn: () => listReleaseIssues(releaseId),
+    retry: false,
   });
 
   const version = release?.version ?? "";
@@ -738,69 +964,76 @@ function JiraTab({
   const repo = product.tracker_repo.trim();
   const repoMissing = isGitHub && !repo;
 
-  // GitHub filters by milestone (default) or label; Jira by label or raw JQL.
-  const [ghMode, setGhMode] = useState<"milestone" | "label">("milestone");
-  const [jiraMode, setJiraMode] = useState<"label" | "jql">("label");
-  const [milestone, setMilestone] = useState("");
-  const [label, setLabel] = useState("");
-  const [jql, setJql] = useState("");
-  // The issue whose details are open, if any (its detail is fetched on demand).
+  const [editing, setEditing] = useState(false);
+  const [mode, setMode] = useState<IssueFilterMode>(isGitHub ? "milestone" : "label");
+  const [value, setValue] = useState("");
   const [detailKey, setDetailKey] = useState<string | null>(null);
+  const [newKey, setNewKey] = useState("");
 
-  // A saved filter is applied automatically once it (and the tracker) load.
+  // Seed the edit form from the stored criteria once it loads.
   useEffect(() => {
-    if (!savedFilter || !cfg) return;
-    const { mode, value } = savedFilter;
-    if (mode === "milestone") { setGhMode("milestone"); setMilestone(value); }
-    else if (mode === "jql") { setJiraMode("jql"); setJql(value); }
-    else if (mode === "label") {
-      setLabel(value);
-      if (isGitHub) setGhMode("label"); else setJiraMode("label");
-    }
-  }, [savedFilter, cfg, isGitHub]);
+    if (!criteria) return;
+    setMode(criteria.mode);
+    setValue(criteria.value);
+  }, [criteria]);
 
-  // The (mode, value) currently chosen in the form, for sync and save.
-  const currentFilter = (): { mode: string; value: string } => {
-    if (isGitHub) return ghMode === "label" ? { mode: "label", value: label } : { mode: "milestone", value: milestone };
-    return jiraMode === "jql" ? { mode: "jql", value: jql } : { mode: "label", value: label };
+  // Everything a release's issues feed is answered by the tracker, so a ticket
+  // moving in or out of the release invalidates all of it.
+  const invalidateIssues = () => {
+    qc.invalidateQueries({ queryKey: ["issues", releaseId] });
+    qc.invalidateQueries({ queryKey: ["status", releaseId] });
+    qc.invalidateQueries({ queryKey: ["bug-count", releaseId] });
+    qc.invalidateQueries({ queryKey: ["history", releaseId] });
   };
 
-  const sync = useMutation({
-    mutationFn: () => {
-      const f = currentFilter();
-      if (f.mode === "milestone") return syncJira(releaseId, { milestone: f.value });
-      if (f.mode === "jql") return syncJira(releaseId, { jql: f.value });
-      return syncJira(releaseId, { release_label: f.value });
+  // Adding or removing a ticket edits the ticket itself in the tracker — it is
+  // the only place membership exists. The notification names the edit, because
+  // this changed something in the operator's ticketing system, not just here.
+  const membership = useMutation({
+    mutationFn: ({ key, member }: { key: string; member: boolean }) =>
+      member ? addIssueToRelease(releaseId, key) : removeIssueFromRelease(releaseId, key),
+    onSuccess: (data, vars) => {
+      setNewKey("");
+      invalidateIssues();
+      notifications.show({
+        color: "teal",
+        message: vars.member
+          ? `${data.key} added — ${data.criteria} set on the ticket in ${trackerName}`
+          : `${data.key} removed — ${data.criteria} cleared on the ticket in ${trackerName}`,
+      });
     },
-    onSuccess: (data) => {
-      qc.setQueryData(key, data);
-      qc.invalidateQueries({ queryKey: ["status", releaseId] });
-      notifications.show({ message: `Synced ${data.length} issue(s) from ${trackerName}`, color: "teal" });
-    },
-    onError: (e: any) => notifyApiError(e, "Issue sync failed"),
+    onError: (e: any, vars) =>
+      notifyApiError(e, `Could not ${vars.member ? "add" : "remove"} the ticket`),
   });
 
   const save = useMutation({
-    mutationFn: () => { const f = currentFilter(); return saveSyncFilter(releaseId, f.mode, f.value); },
+    mutationFn: () => saveIssueFilter(releaseId, mode, value.trim()),
     onSuccess: (data) => {
-      qc.setQueryData(["sync-filter", releaseId], data);
-      notifications.show({ message: "Filter saved — it will be applied automatically", color: "teal" });
+      qc.setQueryData(["issue-filter", releaseId], data);
+      // The criteria decides which tickets the release contains, so everything
+      // derived from them is now answering a different question.
+      qc.invalidateQueries({ queryKey: ["issues", releaseId] });
+      qc.invalidateQueries({ queryKey: ["status", releaseId] });
+      qc.invalidateQueries({ queryKey: ["bug-count", releaseId] });
+      qc.invalidateQueries({ queryKey: ["history", releaseId] });
+      setEditing(false);
+      notifications.show({ message: "Criteria updated", color: "teal" });
     },
-    onError: (e: any) => notifyApiError(e, "Could not save filter"),
+    onError: (e: any) => notifyApiError(e, "Could not update the criteria"),
   });
 
-  // Last sync = most recent synced_at across the cached issues. For releases
-  // that are not yet Approved, a sync older than a day is highlighted in red.
-  const lastSyncMs = issues.reduce((max, i) => Math.max(max, new Date(i.synced_at).getTime()), 0);
-  const hasSync = lastSyncMs > 0;
-  const isApproved = release?.state === "Approved";
-  const stale = hasSync && !isApproved && Date.now() - lastSyncMs > STALE_MS;
+  const describeCriteria = () => {
+    if (criteria) return `${criteria.mode} = ${criteria.value}`;
+    // Releases created before criteria were recorded fall back to the tracker's
+    // own release grouping.
+    return isGitHub ? `milestone = ${version} (default)` : `fixVersion = ${version} (default)`;
+  };
 
   return (
     <Stack gap="md">
       <Card withBorder padding="md">
         <Group justify="space-between" mb="xs">
-          <Title order={5}>Sync issues from {trackerName}</Title>
+          <Title order={5}>Tickets in this release</Title>
           <Badge
             variant="light"
             color={isGitHub ? "dark" : "blue"}
@@ -810,98 +1043,109 @@ function JiraTab({
           </Badge>
         </Group>
 
-        <Text size="sm" mb="sm" c={stale ? "red" : "dimmed"} fw={stale ? 600 : undefined}>
-          {hasSync
-            ? `Last synced: ${new Date(lastSyncMs).toLocaleString()}${stale ? " — over a day old, re-sync recommended" : ""}`
-            : "Not synced yet."}
+        <Text size="sm" c="dimmed" mb="sm">
+          Read from {trackerName} on every view — Release-It stores only the search
+          criteria below, never the tickets.
         </Text>
 
         {repoMissing ? (
           <Alert color="orange" variant="light">
-            This product has no target project set. Configure it in Configuration → Projects before syncing.
+            This product has no target project set. Configure it in Configuration → Projects
+            before its issues can be read.
           </Alert>
+        ) : editing ? (
+          <Stack gap="sm">
+            <CriteriaFields
+              provider={provider}
+              mode={mode}
+              value={value}
+              onModeChange={setMode}
+              onValueChange={setValue}
+            />
+            <Group>
+              <Button
+                disabled={!value.trim()}
+                loading={save.isPending}
+                onClick={() => save.mutate()}
+              >
+                Save criteria
+              </Button>
+              <Button
+                variant="subtle"
+                color="gray"
+                onClick={() => {
+                  setEditing(false);
+                  if (criteria) { setMode(criteria.mode); setValue(criteria.value); }
+                }}
+              >
+                Cancel
+              </Button>
+            </Group>
+          </Stack>
         ) : (
-          <Group align="flex-end" gap="sm">
-            {isGitHub ? (
-              <>
-                <Select
-                  label="Filter by"
-                  data={[
-                    { value: "milestone", label: "Milestone" },
-                    { value: "label", label: "Label" },
-                  ]}
-                  value={ghMode}
-                  onChange={(v) => setGhMode((v as "milestone" | "label") ?? "milestone")}
-                  maw={150}
-                  allowDeselect={false}
-                />
-                {ghMode === "milestone" ? (
-                  <TextInput
-                    label="Milestone"
-                    placeholder={version || "e.g. 0.1.0"}
-                    description={`Defaults to the release version (${version})`}
-                    value={milestone}
-                    onChange={(e) => setMilestone(e.currentTarget.value)}
-                    style={{ flex: 1 }}
-                  />
-                ) : (
-                  <TextInput
-                    label="Label"
-                    placeholder="e.g. release/0.1.0"
-                    value={label}
-                    onChange={(e) => setLabel(e.currentTarget.value)}
-                    style={{ flex: 1 }}
-                  />
-                )}
-              </>
-            ) : (
-              <>
-                <Select
-                  label="Filter by"
-                  data={[
-                    { value: "label", label: "Release label" },
-                    { value: "jql", label: "Custom JQL" },
-                  ]}
-                  value={jiraMode}
-                  onChange={(v) => setJiraMode((v as "label" | "jql") ?? "label")}
-                  maw={160}
-                  allowDeselect={false}
-                />
-                {jiraMode === "label" ? (
-                  <TextInput
-                    label="Release label"
-                    placeholder="e.g. 2025-Q3"
-                    value={label}
-                    onChange={(e) => setLabel(e.currentTarget.value)}
-                    style={{ flex: 1 }}
-                  />
-                ) : (
-                  <TextInput
-                    label="JQL query"
-                    placeholder='project = REL AND fixVersion = "1.2.0"'
-                    value={jql}
-                    onChange={(e) => setJql(e.currentTarget.value)}
-                    style={{ flex: 1 }}
-                  />
-                )}
-              </>
-            )}
-            <Button loading={sync.isPending} onClick={() => sync.mutate()}>
-              Sync now
+          <Group gap="sm">
+            <Badge size="lg" variant="light" color="grape" leftSection={<IconListDetails size={12} />}>
+              {describeCriteria()}
+            </Badge>
+            <Button size="compact-sm" variant="light" onClick={() => setEditing(true)}>
+              Change criteria
             </Button>
-            <Button variant="light" loading={save.isPending} onClick={() => save.mutate()}>
-              Save filter
+            <Button
+              size="compact-sm"
+              variant="subtle"
+              leftSection={<IconRefresh size={14} />}
+              loading={isFetching}
+              onClick={() => refetch()}
+            >
+              Refresh
+            </Button>
+          </Group>
+        )}
+
+        {/* Adding a ticket edits the ticket: it joins the release by coming to
+            match the criteria. The hint says so, because this writes to the
+            operator's ticketing system. */}
+        {!repoMissing && !editing && (
+          <Group align="flex-end" gap="sm" mt="md">
+            <TextInput
+              label="Add a ticket to this release"
+              description={
+                criteria
+                  ? `Sets ${criteria.mode} "${criteria.value}" on the ticket in ${trackerName}, so it matches this release's criteria`
+                  : `Give this release a criteria first — a ticket joins it by matching one`
+              }
+              placeholder={isGitHub ? "e.g. #12" : "e.g. REL-1"}
+              value={newKey}
+              disabled={!criteria}
+              onChange={(e) => setNewKey(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && newKey.trim())
+                  membership.mutate({ key: newKey.trim(), member: true });
+              }}
+              style={{ flex: 1, maxWidth: 420 }}
+            />
+            <Button
+              leftSection={<IconPlus size={16} />}
+              disabled={!newKey.trim() || !criteria}
+              loading={membership.isPending && membership.variables?.member === true}
+              onClick={() => membership.mutate({ key: newKey.trim(), member: true })}
+            >
+              Add ticket
             </Button>
           </Group>
         )}
       </Card>
 
-      {issues.length === 0 ? (
+      {error ? (
+        <Alert color="red" variant="light" title={`Could not read the issues from ${trackerName}`}>
+          {apiErrorMessage(error, "The ticketing system could not be reached.")}
+        </Alert>
+      ) : issues.length === 0 ? (
         <Card>
           <EmptyState
             icon={IconListDetails}
-            title="No issues synced yet"
-            description="Use the panel above to pull issues for this release from the active tracker."
+            title="No tickets match this criteria"
+            description={`No issues in ${trackerName} match ${describeCriteria()}. Change the criteria above if this release should contain other work.`}
           />
         </Card>
       ) : (
@@ -918,9 +1162,9 @@ function JiraTab({
             </Table.Thead>
             <Table.Tbody>
               {issues.map((i) => (
-                <Table.Tr key={i.id}>
-                  <Table.Td fw={600}>{i.issue_key}</Table.Td>
-                  <Table.Td><Badge size="sm" variant="light" color="gray">{i.issue_type}</Badge></Table.Td>
+                <Table.Tr key={i.key}>
+                  <Table.Td fw={600}>{i.key}</Table.Td>
+                  <Table.Td><Badge size="sm" variant="light" color="gray">{i.type}</Badge></Table.Td>
                   <Table.Td>{i.summary}</Table.Td>
                   <Table.Td>
                     <Badge size="sm" variant="light" color={issueStatusColor(i.status)}>{i.status}</Badge>
@@ -931,16 +1175,13 @@ function JiraTab({
                         <ActionIcon
                           variant="subtle"
                           color="gray"
-                          aria-label={`View details of ${i.issue_key}`}
-                          onClick={() => setDetailKey(i.issue_key)}
+                          aria-label={`View details of ${i.key}`}
+                          onClick={() => setDetailKey(i.key)}
                         >
                           <IconEye size={16} />
                         </ActionIcon>
                       </Tooltip>
-                      {/* Issues cached before the URL was recorded have none until
-                          the next sync — `data-disabled` keeps the tooltip working,
-                          which a truly disabled control would swallow. */}
-                      {i.url ? (
+                      {i.url && (
                         <Tooltip label={`Open in ${trackerName}`}>
                           <ActionIcon
                             variant="subtle"
@@ -949,15 +1190,33 @@ function JiraTab({
                             href={i.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            aria-label={`Open ${i.issue_key} in ${trackerName}`}
+                            aria-label={`Open ${i.key} in ${trackerName}`}
                           >
                             <IconExternalLink size={16} />
                           </ActionIcon>
                         </Tooltip>
-                      ) : (
-                        <Tooltip label={`Re-sync to link this issue to ${trackerName}`}>
-                          <ActionIcon variant="subtle" color="gray" data-disabled onClick={(e) => e.preventDefault()}>
-                            <IconExternalLink size={16} />
+                      )}
+                      {criteria && (
+                        // Spelled out, because this edits the ticket in the
+                        // operator's tracker — it does not delete it, and it does
+                        // not just hide it from a list of ours.
+                        <Tooltip
+                          label={`Remove from this release — clears ${criteria.mode} "${criteria.value}" on ${i.key} in ${trackerName}`}
+                          multiline
+                          w={260}
+                        >
+                          <ActionIcon
+                            variant="subtle"
+                            color="red"
+                            aria-label={`Remove ${i.key} from this release`}
+                            loading={
+                              membership.isPending &&
+                              membership.variables?.key === i.key &&
+                              membership.variables?.member === false
+                            }
+                            onClick={() => membership.mutate({ key: i.key, member: false })}
+                          >
+                            <IconCircleMinus size={16} />
                           </ActionIcon>
                         </Tooltip>
                       )}
@@ -985,13 +1244,19 @@ const ACTION_LABEL: Record<string, string> = {
   created: "Created",
   status_update: "State change",
   inherited: "Inherited",
-  jira_sync: "Jira sync",
+  issue_criteria: "Issue criteria",
+  issue_added: "Ticket added",
+  issue_removed: "Ticket removed",
+  jira_sync: "Jira sync",  // historical: recorded when issues were still synced
 };
 
 function describeChange(e: AuditEntry): string {
   if (e.action === "status_update") return `${e.old_value ?? "?"} → ${e.new_value ?? "?"}`;
   if (e.action === "created") return `Initial state: ${e.new_value ?? "?"}`;
   if (e.action === "inherited") return `From release #${e.old_value} → #${e.new_value}`;
+  if (e.action === "issue_criteria")
+    return e.old_value ? `${e.old_value} → ${e.new_value}` : (e.new_value ?? "");
+  if (e.action === "issue_added" || e.action === "issue_removed") return e.new_value ?? "";
   if (e.action === "jira_sync") return e.new_value ?? "";
   return [e.old_value, e.new_value].filter(Boolean).join(" → ");
 }
@@ -1167,13 +1432,13 @@ export function ProductDetailPage() {
 
         <Tabs.Panel value="issues" pt="md">
           {activeId && product ? (
-            <JiraTab
+            <IssuesTab
               releaseId={activeId}
               product={product}
               release={activeRelease}
             />
           ) : (
-            needsRelease("sync tracker issues")
+            needsRelease("see its tickets")
           )}
         </Tabs.Panel>
 

@@ -2,8 +2,8 @@
 
 On a state change (e.g. -> Approved) ReleaseIT can trigger a pipeline on a
 configured service via REST + token auth. Each runner implements ``trigger``.
-GitLab CI and Ansible/AWX call their real backing service; there is no stub, so
-``trigger`` raises when its integration is not enabled.
+The runner calls its real backing service; there is no stub, so ``trigger``
+raises when its integration is not enabled.
 """
 from __future__ import annotations
 
@@ -39,25 +39,8 @@ class GitLabCIRunner:
         return resp.json()
 
 
-class AWXRunner:
-    name = "awx"
-
-    def trigger(self, release_id: int, ref: str, variables: dict[str, str]) -> dict:
-        if not settings.awx_enabled:
-            raise RuntimeError("AWX integration is not enabled")
-        resp = httpx.post(
-            f"{settings.awx_base_url}/api/v2/job_templates/launch/",
-            headers={"Authorization": f"Bearer {settings.awx_token}"},
-            json={"extra_vars": variables},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-
 _RUNNERS: dict[str, PipelineRunner] = {
     GitLabCIRunner.name: GitLabCIRunner(),
-    AWXRunner.name: AWXRunner(),
 }
 
 
