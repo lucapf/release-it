@@ -46,6 +46,9 @@ authzPolicy: |
     - { path: "/api/v1/product",   methods: ["POST"],   roles: ["Developer", "Release Manager", "Administrator"] }
     - { path: "/api/v1/product/*", methods: ["PATCH"],  roles: ["Developer", "Release Manager", "Administrator"] }
     - { path: "/api/v1/product/*", methods: ["DELETE"], roles: ["Administrator"] }
+    # Git repository links (a product sub-resource) — configured by Administrators
+    - { path: "/api/v1/product/*/git-repos",   methods: ["POST"], roles: ["Administrator"] }
+    - { path: "/api/v1/product/*/git-repos/*", methods: ["PATCH", "DELETE"], roles: ["Administrator"] }
     # Releases
     - { path: "/api/v1/release",                methods: ["POST"],   roles: ["Developer", "Release Manager", "Administrator"] }
     - { path: "/api/v1/release/*",              methods: ["DELETE"], roles: ["Release Manager", "Administrator"] }
@@ -58,5 +61,7 @@ authzPolicy: |
     - { path: "/api/v1/config/**", methods: ["POST", "PUT", "PATCH", "DELETE"], roles: ["Release Manager", "Administrator"] }
     # LLM assistant (chat): any authenticated role; per-action RBAC is re-enforced by the backend
     - { path: "/api/v1/chat", methods: ["POST"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }
+    # Staging a file attached in the chat; it reaches a release only once the assistant links it
+    - { path: "/api/v1/chat/attachments", methods: ["POST"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }
     # Reads: any authenticated ReleaseIT role
     - { path: "/api/v1/**", methods: ["GET"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }

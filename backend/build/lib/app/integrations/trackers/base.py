@@ -1,0 +1,137 @@
+"""Common issue-tracker interface.
+
+Every tracker fetches the issues belonging to a release from an external system
+and returns them in a single normalized shape:
+
+    {"key": str, "type": str, "summary": str, "status": str, "url": str,
+     "closed": bool}
+
+``url`` is the human-facing page an operator opens in the tracker's own web UI,
+not the REST endpoint. It is empty when the tracker cannot determine it.
+
+``closed`` is the tracker's *own* verdict on whether the issue is finished — not
+ours. The tracker owns this fact, so each provider derives it from its native
+semantics (Jira: the status' ``statusCategory``; GitHub/GitLab: the issue state)
+rather than Release-It comparing status names against a configured list. A
+project is free to call its done-status "Resolved" or "Shipped"; ``closed`` is
+still true. When a provider cannot tell, it reports ``False`` — an issue we
+cannot prove is finished must keep blocking a guarded transition.
+
+A tracker also fetches a single issue in full, for the on-demand detail view:
+
+    {"key", "type", "summary", "status", "url", "closed", "description",
+     "assignee", "reporter", "priority", "labels": [str], "created_at",
+     "updated_at"}
+
+Concrete trackers live in their own modules (``jira.py``, ``github.py``,
+``gitlab.py``) and implement :class:`IssueTracker`. There are no in-process
+stubs: a tracker talks to its real backing service.
+"""
+from __future__ import annotations
+
+from typing import Protocol
+
+# Status used to mark an issue as completed/closed across trackers.
+DONE = "Done"
+
+# Every key a ``fetch_issue`` result carries, so callers can rely on their
+# presence however sparse the tracker's own payload was.
+DETAIL_FIELDS = (
+    "key", "type", "summary", "status", "url", "closed",
+    "description", "assignee", "reporter", "priority",
+    "labels", "created_at", "updated_at",
+)
+
+
+def detail(**known) -> dict:
+    """A full detail dict: every field present, ``known`` filled in."""
+    out: dict = {f: "" for f in DETAIL_FIELDS}
+    out["labels"] = []
+    out["closed"] = False
+    out.update(known)
+    return out
+
+
+# --- Errors raised when validating a tracker project binding ----------------
+class TrackerError(Exception):
+    """Base class for tracker connectivity/validation failures."""
+
+
+class TrackerProjectNotFound(TrackerError):
+    """The named project/repository does not exist on the tracker."""
+
+
+class TrackerUnreachable(TrackerError):
+    """The tracker could not be reached (bad URL/credentials, network error)."""
+
+
+class TrackerNotConfigured(TrackerError):
+    """No tracker is enabled/configured for the active provider.
+
+    Raised rather than answering with an empty issue list: the tracker owns the
+    issues, so "we cannot ask it" and "it says there are none" must not look the
+    same to a caller that gates a release on the answer.
+    """
+
+
+class MembershipNotEnforceable(TrackerError):
+    """This release's criteria cannot be satisfied by editing a ticket.
+
+    Membership of a release is not something Release-It records — a ticket belongs
+    to a release because it *matches the release's criteria*. So adding one means
+    editing the ticket until it does (a label criteria → add the label). That only
+    works for criteria with a single obvious edit behind them. An arbitrary JQL
+    query (``project = REL AND priority = High AND sprint in openSprints()``) has
+    no such edit: there is no one change to a ticket that makes it match, and
+    guessing at one would silently rewrite fields the operator never mentioned.
+    Raised with an explanation the operator can act on.
+    """
+
+
+class IssueNotFound(TrackerError):
+    """The tracker has no issue with that key."""
+
+
+class IssueTracker(Protocol):
+    """Fetches the issues contained in a release from an external tracker.
+
+    ``query`` is the resolved filter value (Jira: JQL; GitHub: a milestone
+    title or label). ``filter_kind`` selects how ``query`` is interpreted for
+    trackers that support more than one mode (GitHub: ``"milestone"`` or
+    ``"label"``). ``repo`` is the product's repository slug when relevant
+    (GitHub ``"owner/repo"``).
+    """
+
+    def fetch_issues(
+        self, query: str, *, repo: str = "", filter_kind: str = ""
+    ) -> list[dict]:
+        ...
+
+    def fetch_issue(self, key: str, *, repo: str = "") -> dict | None:
+        """One issue in full, or None when it does not exist or the tracker is
+        not configured. ``key`` is the normalized key ``fetch_issues`` stored
+        (Jira: ``"REL-1"``; GitHub: ``"#12"``)."""
+        ...
+
+    def verify_project(self, repo: str) -> None:
+        """Confirm ``repo`` (Jira project key, GitHub ``"owner/repo"``) exists on
+        the tracker. Returns normally when it does; raises
+        :class:`TrackerProjectNotFound` when it does not, or
+        :class:`TrackerUnreachable` when the tracker cannot be reached."""
+        ...
+
+    def set_membership(
+        self, key: str, *, mode: str, value: str, member: bool, repo: str = ""
+    ) -> None:
+        """Edit issue ``key`` so that it matches (``member=True``) or no longer
+        matches (``member=False``) the criteria ``(mode, value)``.
+
+        This is how a ticket is added to or removed from a release: the tracker is
+        the only place membership exists, so the edit happens *there*. A ``label``
+        criteria adds/removes the label; a GitHub ``milestone`` criteria sets/clears
+        the milestone.
+
+        Raises :class:`MembershipNotEnforceable` when the criteria has no such edit
+        behind it, and :class:`IssueNotFound` when the issue does not exist.
+        """
+        ...

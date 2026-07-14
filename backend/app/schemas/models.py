@@ -28,6 +28,45 @@ class Product(BaseModel):
     created_at: datetime
 
 
+# --- Product git repositories -----------------------------------------------
+class GitRepoLinkCreate(BaseModel):
+    """Link a git repository to a product. ``component_name`` is required for
+    role 'component': it is the dependency name the service appears under in the
+    umbrella Chart.yaml, which change detection joins on. A simple product links
+    its whole codebase as one 'codebase' repo instead of an umbrella chart."""
+    provider: Literal["github", "gitlab"]
+    repo: str = Field(min_length=1, description='GitHub "owner/repo" or GitLab "group/project"')
+    role: Literal["component", "library", "deployment", "codebase"]
+    component_name: str = ""
+    tag_pattern: str = "v{version}"
+    web_url: str = ""
+    chart_path: str = "Chart.yaml"  # deployment role only
+
+
+class GitRepoLinkUpdate(BaseModel):
+    """Editable repo-link fields. Only the supplied fields change."""
+    provider: Literal["github", "gitlab"] | None = None
+    repo: str | None = None
+    role: Literal["component", "library", "deployment", "codebase"] | None = None
+    component_name: str | None = None
+    tag_pattern: str | None = None
+    web_url: str | None = None
+    chart_path: str | None = None
+
+
+class GitRepoLink(BaseModel):
+    id: int
+    product_id: int
+    provider: str
+    repo: str
+    role: str
+    component_name: str = ""
+    tag_pattern: str = "v{version}"
+    web_url: str = ""
+    chart_path: str = "Chart.yaml"
+    created_at: datetime
+
+
 # --- Release ---------------------------------------------------------------
 class IssueFilter(BaseModel):
     """The search criteria that defines which tickets a release contains, e.g.
@@ -262,12 +301,28 @@ class LLMConfigView(BaseModel):
     ollama: OllamaConfigView = OllamaConfigView()
 
 
+class GitProviderConfigView(BaseModel):
+    """One git-hosting connection (no secrets)."""
+    enabled: bool = False
+    base_url: str = ""
+    token_set: bool = False
+
+
+class GitConfigView(BaseModel):
+    """Git hosting connections. Both may be enabled at once — a product's repos
+    can span GitHub and a self-hosted GitLab. Repositories themselves are linked
+    per-product, so they are intentionally absent here."""
+    github: GitProviderConfigView = GitProviderConfigView()
+    gitlab: GitProviderConfigView = GitProviderConfigView()
+
+
 class ConfigView(BaseModel):
     """Current configuration as shown on the configuration page (no secrets)."""
     tracker_provider: str = "jira"
     jira: JiraConfigView = JiraConfigView()
     github: GitHubConfigView = GitHubConfigView()
     llm: LLMConfigView = LLMConfigView()
+    git: GitConfigView = GitConfigView()
 
 
 class ConfigUpdate(BaseModel):
@@ -286,6 +341,13 @@ class ConfigUpdate(BaseModel):
     claude_api_key: str | None = None
     ollama_base_url: str | None = None
     ollama_model: str | None = None
+    # Git hosting connections (tokens write-only, like the tracker's)
+    git_github_enabled: bool | None = None
+    git_github_base_url: str | None = None
+    git_github_token: str | None = None
+    git_gitlab_enabled: bool | None = None
+    git_gitlab_base_url: str | None = None
+    git_gitlab_token: str | None = None
 
 
 # --- Workflow (state machine exposure) -------------------------------------
@@ -372,6 +434,73 @@ class ReleaseBugCount(BaseModel):
     total_bugs: int
 
 
+# --- Release code changes (read live from the git hosting) ------------------
+class CommitView(BaseModel):
+    """One commit of a component's diff, with the tickets it references.
+    ``tickets`` empty means the commit is unmapped — reported, never guessed."""
+    sha: str
+    short_sha: str
+    subject: str
+    author: str = ""
+    url: str = ""
+    tickets: list[str] = Field(default_factory=list)
+
+
+class ComponentChangeView(BaseModel):
+    """One umbrella-chart dependency's change in a release. ``status`` is
+    'error' when the component's own diff could not be produced (missing tag,
+    unreachable repo) — the reason is in ``error`` and must never read as
+    'no changes'."""
+    name: str
+    repo_id: int | None = None
+    repo: str = ""
+    provider: str = ""
+    web_url: str = ""
+    old_version: str | None = None  # None: added in this release
+    new_version: str | None = None  # None: removed in this release
+    status: Literal["changed", "added", "removed", "unchanged", "error"]
+    error: str = ""
+    compare_url: str = ""
+    commit_count: int = 0
+    commits_truncated: bool = False
+    commits: list[CommitView] = Field(default_factory=list)
+    mapped_count: int = 0
+    unmapped_count: int = 0
+
+
+class UnmatchedDependency(BaseModel):
+    """A Chart.yaml dependency with no linked component repository."""
+    name: str
+    old_version: str | None = None
+    new_version: str | None = None
+
+
+class ReleaseChanges(BaseModel):
+    """The code changes of a release, computed live. Nothing is cached; raw
+    file diffs never leave the backend — this is the commit/version view.
+
+    ``mode`` says how versions are anchored to git: 'umbrella' diffs the Helm
+    umbrella Chart.yaml between the two release tags and then each changed
+    service between its version tags; 'single-repo' (a simple product) diffs
+    the one codebase repository directly between the two release tags."""
+    release_id: int
+    version: str
+    previous_release_id: int | None = None
+    previous_version: str | None = None
+    mode: Literal["umbrella", "single-repo"] = "umbrella"
+    # The anchor repo: the umbrella chart, or the codebase repo in single-repo mode.
+    umbrella_repo: str
+    umbrella_provider: str
+    old_tag: str | None = None
+    new_tag: str | None = None
+    # Why there is nothing to diff against ("" when there is): first release,
+    # or a tag that does not exist yet.
+    baseline_missing: str = ""
+    components: list[ComponentChangeView] = Field(default_factory=list)
+    unmatched_dependencies: list[UnmatchedDependency] = Field(default_factory=list)
+    library_repos: list[GitRepoLink] = Field(default_factory=list)
+
+
 # --- LLM assistant (chat) --------------------------------------------------
 class ChatMessage(BaseModel):
     """One turn of the operator/assistant conversation. The client sends the full
@@ -380,8 +509,22 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class ChatAttachment(BaseModel):
+    """A file the operator attached in the chat, staged (POST /chat/attachments)
+    until the assistant links it to a document. The transcript carries text only,
+    so the model sees this metadata — never the bytes."""
+    id: int
+    filename: str
+    content_type: str
+    size: int
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(..., min_length=1)
+    # Attachments uploaded in this conversation and not yet linked to a document.
+    # The client resends them each turn (the server is stateless), and the server
+    # only honours the ones this operator uploaded and has not already spent.
+    attachment_ids: list[int] = Field(default_factory=list)
 
 
 class ChatAction(BaseModel):
@@ -409,6 +552,9 @@ class ChatResponse(BaseModel):
     reply: str
     actions: list[ChatAction] = []
     documents: list[ChatDocumentRef] = []
+    # Attachments the assistant linked to a document during this turn: they are
+    # spent, so the UI drops them from the composer and stops resending them.
+    linked_attachment_ids: list[int] = []
 
 
 class AssistantAction(BaseModel):

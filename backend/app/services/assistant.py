@@ -22,12 +22,14 @@ import psycopg
 
 from app.core.identity import Principal
 from app.integrations import trackers
+from app.integrations.git import GitNotConfigured, GitUnreachable
 from app.integrations.llm_chat import ActionRecord, Dispatch, ToolSpec
+from app.repositories import chat_attachments as chat_attachments_repo
 from app.repositories import config as config_repo
 from app.repositories import documents as documents_repo
 from app.repositories import products as products_repo
 from app.repositories import releases as releases_repo
-from app.services import appconfig, audit, doc_render, release_ops
+from app.services import appconfig, audit, code_review, doc_render, git_changes, release_ops
 from app.services import issues as issues_svc
 from app.services.release_status import compute_status, unmet_requirements
 from app.services.state_machine import StateMachine
@@ -444,6 +446,101 @@ def _upload_document(ctx: ToolContext, args: dict) -> Any:
     }
 
 
+# --- Operator-attached files ------------------------------------------------
+# A file the operator attaches in the chat is staged in `chat_attachment` and the
+# model only ever sees its metadata (see the chat endpoint). These two tools are
+# how the staged bytes become a document: as a brand-new document, or as the next
+# version of one that already exists. Both spend the attachment, so a file cannot
+# be linked twice.
+def _require_attachment(ctx: ToolContext, attachment_id: Any) -> tuple[dict, bytes]:
+    """The staged file, if it exists, belongs to this operator and is unspent."""
+    meta = chat_attachments_repo.get(ctx.conn, int(attachment_id))
+    if meta is None:
+        raise release_ops.ReleaseActionError(
+            404, f"No attached file {attachment_id} — ask the operator to attach it again"
+        )
+    if meta["uploaded_by"] != (ctx.principal.subject or None):
+        raise release_ops.ReleaseActionError(
+            403, f"Attachment {attachment_id} was not uploaded by this operator"
+        )
+    if meta["linked_at"] is not None:
+        raise release_ops.ReleaseActionError(
+            409,
+            f'The attached file "{meta["filename"]}" has already been linked to '
+            f'document {meta["linked_document_id"]}',
+        )
+    content = chat_attachments_repo.content_of(ctx.conn, meta["id"])
+    if content is None:
+        raise release_ops.ReleaseActionError(404, f"Attached file {attachment_id} is gone")
+    return meta, content
+
+
+def _store_attachment_version(
+    ctx: ToolContext, rel: dict, doc: dict, meta: dict, content: bytes
+) -> dict:
+    """Copy a staged file into a new version of ``doc`` and spend the attachment.
+
+    The version lands as DRAFT (add_version always returns a document to DRAFT) —
+    the assistant asks the operator afterwards whether to approve it."""
+    if chat_attachments_repo.mark_linked(ctx.conn, meta["id"], doc["id"]) is None:
+        # Lost a race with a concurrent link: the row was spent between the check
+        # in _require_attachment and here. Fail rather than store a second copy.
+        raise release_ops.ReleaseActionError(
+            409, f'The attached file "{meta["filename"]}" has already been linked'
+        )
+    version = documents_repo.add_version(
+        ctx.conn,
+        doc["id"],
+        meta["filename"],
+        meta["content_type"],
+        content,
+        ctx.principal.subject or None,
+        doc_render.pdf_for(
+            meta["content_type"], content, filename=meta["filename"], title=doc["title"]
+        ),
+    )
+    doc_meta = documents_repo.get_document_meta(ctx.conn, doc["id"])
+    brief = _document_brief(doc_meta)
+    brief.update(
+        {
+            "attachment_id": meta["id"],
+            "filename": meta["filename"],
+            "bytes": len(content),
+            "version": version["version"],
+            "document_ref": _document_ref(rel["id"], doc_meta),
+        }
+    )
+    return brief
+
+
+def _link_attachment_as_new_document(ctx: ToolContext, args: dict) -> Any:
+    """Attach the operator's uploaded file to a release as a NEW document."""
+    rel = _require_release(ctx, args["release_id"])
+    meta, content = _require_attachment(ctx, args["attachment_id"])
+    doc_type = str(args["doc_type"]).strip()
+    if doc_type not in config_repo.document_type_names(ctx.conn):
+        raise release_ops.ReleaseActionError(400, f'Unsupported document type "{doc_type}"')
+    title = str(args.get("title") or meta["filename"]).strip() or meta["filename"]
+    existing = documents_repo.find_document(ctx.conn, rel["id"], title)
+    if existing is not None:
+        raise release_ops.ReleaseActionError(
+            409,
+            f'A document titled "{title}" already exists on this release — link the '
+            f"file as a new version of it (document_id {existing['id']}) instead",
+        )
+    doc = documents_repo.create_document(ctx.conn, rel["id"], title, doc_type)
+    return _store_attachment_version(ctx, rel, {**doc, "title": title}, meta, content)
+
+
+def _link_attachment_as_new_version(ctx: ToolContext, args: dict) -> Any:
+    """Attach the operator's uploaded file as the next version of an EXISTING
+    document (the previous versions stay downloadable)."""
+    rel = _require_release(ctx, args["release_id"])
+    meta, content = _require_attachment(ctx, args["attachment_id"])
+    doc = _resolve_document(ctx, rel, args)
+    return _store_attachment_version(ctx, rel, doc, meta, content)
+
+
 def _transition_release(ctx: ToolContext, args: dict) -> Any:
     rel = release_ops.apply_transition(
         ctx.conn, ctx.sm, ctx.principal,
@@ -475,6 +572,160 @@ def _get_document(ctx: ToolContext, args: dict) -> Any:
     brief = _document_brief(meta)
     brief["document_ref"] = _document_ref(rel["id"], meta)
     return brief
+
+
+# --- Code changes (read live from the git hosting) ---------------------------
+# Bounds for change payloads returned to the model: tool results are fed to it
+# verbatim, so a component's full commit list must never ride along unasked.
+_COMMIT_LIMIT = 50
+_SUBJECT_LIMIT = 120
+_UNMAPPED_SAMPLE = 10
+
+
+def _changes_for(ctx: ToolContext, rel: dict) -> git_changes.ReleaseChangeSet:
+    """The release's change-set, with hosting failures translated into errors
+    the model can relay verbatim — never into an empty change-set."""
+    try:
+        return git_changes.compute_release_changes(ctx.conn, ctx.cfg, rel)
+    except git_changes.ChangesUnavailable as exc:
+        raise release_ops.ReleaseActionError(400, str(exc)) from exc
+    except GitNotConfigured as exc:
+        raise release_ops.ReleaseActionError(
+            503, f"The git hosting cannot be queried: {exc}"
+        ) from exc
+    except GitUnreachable as exc:
+        raise release_ops.ReleaseActionError(
+            502, f"Git hosting query failed: {exc}"
+        ) from exc
+
+
+def _component_summary(c: git_changes.ComponentChange) -> dict:
+    return {
+        "name": c.name,
+        "repo": c.repo,
+        "old_version": c.old_version,
+        "new_version": c.new_version,
+        "status": c.status,
+        "error": c.error,
+        "commit_count": c.commit_count,
+        "mapped_commits": c.mapped_count,
+        "unmapped_commits": c.unmapped_count,
+        "compare_url": c.compare_url,
+    }
+
+
+def _get_release_changes(ctx: ToolContext, args: dict) -> Any:
+    rel = _require_release(ctx, args["release_id"])
+    cs = _changes_for(ctx, rel)
+    return {
+        "version": cs.version,
+        "previous_version": cs.previous_version,
+        "umbrella_repo": cs.umbrella_repo,
+        "old_tag": cs.old_tag,
+        "new_tag": cs.new_tag,
+        "baseline_missing": cs.baseline_missing,
+        "components": [_component_summary(c) for c in cs.components],
+        "unmatched_dependencies": cs.unmatched_dependencies,
+        "library_repos": [r["repo"] for r in cs.library_repos],
+    }
+
+
+def _list_component_commits(ctx: ToolContext, args: dict) -> Any:
+    rel = _require_release(ctx, args["release_id"])
+    cs = _changes_for(ctx, rel)
+    wanted = (args.get("component") or "").strip()
+    change = next((c for c in cs.components if c.name == wanted), None)
+    if change is None:
+        known = ", ".join(c.name for c in cs.components) or "(none)"
+        raise release_ops.ReleaseActionError(
+            404, f"No component '{wanted}' in this release's change-set. "
+                 f"Components: {known}"
+        )
+    if change.status == "error":
+        raise release_ops.ReleaseActionError(502, change.error)
+    commits = change.commits[:_COMMIT_LIMIT]
+    return {
+        "component": change.name,
+        "old_version": change.old_version,
+        "new_version": change.new_version,
+        "total": change.commit_count,
+        "truncated": change.commits_truncated or len(change.commits) > _COMMIT_LIMIT,
+        "compare_url": change.compare_url,
+        "commits": [
+            {
+                "short_sha": k.short_sha,
+                "subject": k.subject[:_SUBJECT_LIMIT],
+                "author": k.author,
+                "tickets": k.tickets,
+                "url": k.url,
+            }
+            for k in commits
+        ],
+    }
+
+
+def _get_ticket_mapping(ctx: ToolContext, args: dict) -> Any:
+    """Coverage report: which commits reference a ticket and which do not.
+    Unmapped commits are reported explicitly — never guessed at."""
+    rel = _require_release(ctx, args["release_id"])
+    cs = _changes_for(ctx, rel)
+    components = []
+    mapped = unmapped = 0
+    for c in cs.components:
+        if c.status not in ("changed", "error"):
+            continue
+        entry = {
+            "name": c.name,
+            "status": c.status,
+            "error": c.error,
+            "mapped": c.mapped_count,
+            "unmapped": c.unmapped_count,
+            "tickets": sorted({t for k in c.commits for t in k.tickets}),
+            "unmapped_subjects": [
+                k.subject[:_SUBJECT_LIMIT] for k in c.commits if not k.tickets
+            ][:_UNMAPPED_SAMPLE],
+        }
+        mapped += c.mapped_count
+        unmapped += c.unmapped_count
+        components.append(entry)
+    return {
+        "version": cs.version,
+        "previous_version": cs.previous_version,
+        "baseline_missing": cs.baseline_missing,
+        "total_mapped": mapped,
+        "total_unmapped": unmapped,
+        "components": components,
+    }
+
+
+def _run_code_review(ctx: ToolContext, args: dict) -> Any:
+    """Run the advisory AI review and attach the report to the release. The
+    report body is not echoed to the model — the document card is the result."""
+    rel = _require_release(ctx, args["release_id"])
+    try:
+        result = code_review.run_code_review(ctx.conn, ctx.cfg, ctx.principal, rel)
+    except (git_changes.ChangesUnavailable, code_review.ReviewUnavailable) as exc:
+        raise release_ops.ReleaseActionError(400, str(exc)) from exc
+    except GitNotConfigured as exc:
+        raise release_ops.ReleaseActionError(
+            503, f"The git hosting cannot be queried: {exc}"
+        ) from exc
+    except GitUnreachable as exc:
+        raise release_ops.ReleaseActionError(
+            502, f"Git hosting query failed: {exc}"
+        ) from exc
+    except RuntimeError as exc:  # LLM engine not configured
+        raise release_ops.ReleaseActionError(503, str(exc)) from exc
+    meta = result["document"]
+    return {
+        "title": meta["title"],
+        "status": meta["status"],
+        "latest_version": meta["latest_version"],
+        "components_reviewed": result["components_reviewed"],
+        "components_skipped": result["components_skipped"],
+        "unmapped_commits": result["unmapped_commits"],
+        "document_ref": _document_ref(rel["id"], meta),
+    }
 
 
 # --- Tool registry ----------------------------------------------------------
@@ -623,6 +874,37 @@ def build_tools() -> list[ToolSpec]:
                "content": {"type": "string", "description": "Document body (text/Markdown)"},
                "filename": {"type": "string"}},
               ["release_id", "doc_type", "title", "content"]),
+        _tool("link_attachment_as_new_document",
+              "Link a file the operator attached in the chat to a release as a NEW "
+              "document (its first version). Use it only when the release has no "
+              "document for this file yet — otherwise use "
+              "link_attachment_as_new_version. `attachment_id` comes from the "
+              "attached-files list in the conversation context; `doc_type` must be "
+              "one of list_document_types; `title` defaults to the file name. "
+              "Confirm the release, document title and type with the operator "
+              "before calling this.",
+              _link_attachment_as_new_document,
+              {"release_id": {"type": "integer"},
+               "attachment_id": {"type": "integer",
+                                 "description": "Id of the file the operator attached"},
+               "doc_type": {"type": "string"},
+               "title": {"type": "string",
+                         "description": "Document title (defaults to the file name)"}},
+              ["release_id", "attachment_id", "doc_type"]),
+        _tool("link_attachment_as_new_version",
+              "Link a file the operator attached in the chat as the NEXT VERSION of "
+              "an existing document on a release (identify it by document_id or "
+              "title; earlier versions stay downloadable). The version number is "
+              "assigned automatically and the document returns to DRAFT. Confirm "
+              "with the operator which document the file updates before calling this.",
+              _link_attachment_as_new_version,
+              {"release_id": {"type": "integer"},
+               "attachment_id": {"type": "integer",
+                                 "description": "Id of the file the operator attached"},
+               "document_id": {"type": "integer"},
+               "title": {"type": "string",
+                         "description": "Document title (used if document_id omitted)"}},
+              ["release_id", "attachment_id"]),
         _tool("transition_release",
               "Apply a workflow transition to a release (e.g. 'Ready', 'Approve'). "
               "Role and readiness guards are enforced. Pass the operator's comment "
@@ -635,6 +917,43 @@ def build_tools() -> list[ToolSpec]:
                         "description": "The operator's comment explaining this "
                                        "state change (ask for it if not given)"}},
               ["release_id", "transition"]),
+        _tool("get_release_changes",
+              "The code changes a release ships, read live from git: which "
+              "components (services) changed and their old→new versions, from the "
+              "umbrella Helm chart diffed between the previous release's tag and "
+              "this one's — or, for a simple single-repo product, its codebase "
+              "repository diffed directly between the two release tags. Also "
+              "reports Chart.yaml dependencies with no linked repository and why "
+              "a baseline may be missing — relay those to the operator instead of "
+              "treating them as 'no changes'.",
+              _get_release_changes,
+              {"release_id": {"type": "integer"}}, ["release_id"]),
+        _tool("list_component_commits",
+              "The commits of one changed component in a release (between its two "
+              "version tags), each with the tickets it references and a link. "
+              "Component names come from get_release_changes.",
+              _list_component_commits,
+              {"release_id": {"type": "integer"},
+               "component": {"type": "string",
+                             "description": "Component name from get_release_changes"}},
+              ["release_id", "component"]),
+        _tool("get_ticket_mapping",
+              "Ticket-mapping coverage of a release's code changes: per component, "
+              "how many commits reference a ticket (via commit message or branch "
+              "name) and which do not. Unmapped commits are listed by subject — "
+              "report them explicitly, never guess a ticket for them.",
+              _get_ticket_mapping,
+              {"release_id": {"type": "integer"}}, ["release_id"]),
+        _tool("run_code_review",
+              "Run the advisory AI code review over a release's changes: each "
+              "changed component's diff is reviewed for possible bugs, risky "
+              "changes and ticket inconsistencies, and the report is attached to "
+              "the release as a DRAFT 'Code Review Report' document (a new "
+              "version on re-runs). Advisory only — it blocks nothing. Slow: one "
+              "LLM pass per changed component; tell the operator it may take a "
+              "while before calling it.",
+              _run_code_review,
+              {"release_id": {"type": "integer"}}, ["release_id"]),
     ]
 
 
@@ -644,7 +963,9 @@ def build_tools() -> list[ToolSpec]:
 # not just to Release-It: they edit the operator's tickets.
 _WRITE_TOOLS = {"create_release", "upload_document", "transition_release",
                 "set_release_criteria", "approve_document",
-                "add_issue_to_release", "remove_issue_from_release"}
+                "add_issue_to_release", "remove_issue_from_release",
+                "run_code_review",
+                "link_attachment_as_new_document", "link_attachment_as_new_version"}
 
 
 def describe_actions() -> list[dict]:
@@ -694,6 +1015,24 @@ PROMPT_TEMPLATES: list[dict] = [
         ),
     },
     {
+        "key": "code_review",
+        "title": "Review the code changes",
+        "description": "Report what code a release ships, its ticket coverage, "
+                       "and run the advisory AI code review.",
+        "prompt": (
+            "Review the code changes of release <version> of <product>. First "
+            "report the changed components with their old and new versions "
+            "(get_release_changes) and the ticket-mapping coverage, listing any "
+            "commits with no ticket reference and any Chart.yaml dependencies "
+            "with no linked repository. Then run the AI code review "
+            "(run_code_review) and confirm the report attached to the release — "
+            "do not paste the report body; the operator downloads it from the "
+            "document card. If the changes cannot be computed (no umbrella "
+            "repository, missing tag, hosting unreachable), relay the exact "
+            "reason instead of treating it as 'no changes'."
+        ),
+    },
+    {
         "key": "advance_workflow",
         "title": "Advance the workflow",
         "description": "Move a release to its next state in the configured "
@@ -707,6 +1046,46 @@ PROMPT_TEMPLATES: list[dict] = [
         ),
     },
 ]
+
+
+# --- Attached-file context ---------------------------------------------------
+# How much of a text file to show the model. Enough for it to recognise what the
+# document is (a title, a heading, the first lines) without feeding a whole file
+# into the context on every turn — the bytes it links are read from the staging
+# table, never from this preview.
+_PREVIEW_CHARS = 600
+_TEXTUAL_TYPES = ("text/", "application/json", "application/xml")
+
+
+def _is_textual(content_type: str) -> bool:
+    return (content_type or "").lower().startswith(_TEXTUAL_TYPES)
+
+
+def render_attachment_context(conn, attachments: list[dict]) -> str:
+    """The files the operator has attached and not yet linked, as a system-prompt
+    block. This is the model's only view of them: it sees the metadata (and, for
+    text files, an opening excerpt) and passes the ``attachment_id`` back to the
+    link tools — the content itself never travels through the transcript."""
+    if not attachments:
+        return ""
+    lines = [
+        "## Files attached by the operator (not yet linked to a document)",
+        "Each is staged and waiting. Follow the attached-file rules in the "
+        "guidelines above: work out what it is, confirm, link, then ask about "
+        "approval.",
+        "",
+    ]
+    for a in attachments:
+        lines.append(
+            f'- attachment_id={a["id"]}: "{a["filename"]}" '
+            f'({a["content_type"]}, {a["size"]} bytes, uploaded {a["created_at"]})'
+        )
+        if _is_textual(a["content_type"]):
+            content = chat_attachments_repo.content_of(conn, a["id"]) or b""
+            excerpt = content.decode("utf-8", errors="replace")[:_PREVIEW_CHARS].strip()
+            if excerpt:
+                lines.append(f"  Opening excerpt (for identification only):\n  ```\n{excerpt}\n  ```")
+    return "\n".join(lines)
 
 
 # The prompt fields an admin may override (the key is structural and fixed).
@@ -804,6 +1183,9 @@ _ACTION_SUMMARY: dict[str, str] = {
     "get_generation_prompt": "Checked the document type's generation prompt",
     "sync_release_issues": "Synced issues from tracker",
     "get_document": "Prepared document for download",
+    "get_release_changes": "Computed release code changes",
+    "list_component_commits": "Listed component commits",
+    "get_ticket_mapping": "Reported ticket-mapping coverage",
 }
 
 
@@ -821,6 +1203,12 @@ def _summarize(name: str, result: Any, ok: bool) -> str:
         return f"Approved document “{result.get('title')}”"
     if name == "get_document" and isinstance(result, dict):
         return f"Prepared “{result.get('title')}” for download"
+    if name in {"link_attachment_as_new_document", "link_attachment_as_new_version"} and isinstance(result, dict):
+        return (f"Linked “{result.get('filename')}” to “{result.get('title')}” "
+                f"({result.get('doc_type')}) as version {result.get('version')}")
+    if name == "run_code_review" and isinstance(result, dict):
+        return (f"Generated “{result.get('title')}” "
+                f"({result.get('components_reviewed')} component(s) reviewed)")
     return _ACTION_SUMMARY.get(name, name)
 
 

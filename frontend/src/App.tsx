@@ -39,6 +39,7 @@ import {
   DocumentTypesPage,
   WorkflowPage,
   TrackerPage,
+  GitHostingPage,
   AssistantActionsPage,
 } from "./pages/Configuration";
 import { LlmPage } from "./pages/Llm";
@@ -322,6 +323,10 @@ export function App() {
       <Route
         path="/configuration/tracker"
         element={<Protected><Shell><AdminOnly><TrackerPage /></AdminOnly></Shell></Protected>}
+      />
+      <Route
+        path="/configuration/git"
+        element={<Protected><Shell><AdminOnly><GitHostingPage /></AdminOnly></Shell></Protected>}
       />
       <Route
         path="/configuration/assistant-actions"

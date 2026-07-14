@@ -104,6 +104,14 @@ def test_authorize_with_default_policy():
     assert authz.authorize("DELETE", "/api/v1/release/3/documents/5", admin)
     assert not authz.authorize("DELETE", "/api/v1/release/3/documents/5", dev)
     assert not authz.authorize("DELETE", "/api/v1/release/3/documents/5", qa)
+    # Git repository links: Administrators configure them; everyone may read.
+    assert authz.authorize("POST", "/api/v1/product/7/git-repos", admin)
+    assert not authz.authorize("POST", "/api/v1/product/7/git-repos", dev)
+    assert authz.authorize("PATCH", "/api/v1/product/7/git-repos/2", admin)
+    assert authz.authorize("DELETE", "/api/v1/product/7/git-repos/2", admin)
+    assert not authz.authorize("DELETE", "/api/v1/product/7/git-repos/2",
+                               _token("rm2", ["Release Manager"]))
+    assert authz.authorize("GET", "/api/v1/product/7/git-repos", dev)
     # User management is admin-only, even for reads.
     assert not authz.authorize("GET", "/api/v1/user-management/users", dev)
     assert authz.authorize("GET", "/api/v1/user-management/users", admin)

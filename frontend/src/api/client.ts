@@ -157,11 +157,17 @@ export interface LLMConfigView {
   claude: ClaudeConfigView;
   ollama: OllamaConfigView;
 }
+// Git hosting connections. Both may be enabled at once (a product's repos can
+// span GitHub and a self-hosted GitLab); the repositories themselves are
+// linked per-product.
+export interface GitProviderConfigView { enabled: boolean; base_url: string; token_set: boolean }
+export interface GitConfigView { github: GitProviderConfigView; gitlab: GitProviderConfigView }
 export interface ConfigView {
   tracker_provider: "jira" | "github";
   jira: JiraConfigView;
   github: GitHubConfigView;
   llm: LLMConfigView;
+  git: GitConfigView;
 }
 export interface ConfigUpdate {
   tracker_provider?: "jira" | "github";
@@ -170,6 +176,8 @@ export interface ConfigUpdate {
   llm_provider?: "claude" | "ollama";
   claude_model?: string; claude_api_key?: string;
   ollama_base_url?: string; ollama_model?: string;
+  git_github_enabled?: boolean; git_github_base_url?: string; git_github_token?: string;
+  git_gitlab_enabled?: boolean; git_gitlab_base_url?: string; git_gitlab_token?: string;
 }
 
 // --- Audit / history -------------------------------------------------------
@@ -403,6 +411,77 @@ export const saveIssueFilter = (releaseId: number, mode: IssueFilterMode, value:
     .put<IssueFilterView>(`/api/v1/release/${releaseId}/issue-filter`, { mode, value })
     .then((r) => r.data);
 
+// --- Product git repositories ------------------------------------------------
+// A product's code: one repo per component (component_name matches the umbrella
+// Chart.yaml dependency name), libraries (link-only), and exactly one version
+// anchor — either the Helm umbrella chart (role "deployment") or, for a simple
+// single-repo product, the whole codebase (role "codebase"), tagged with the
+// product release version.
+export type GitProvider = "github" | "gitlab";
+export type GitRepoRole = "component" | "library" | "deployment" | "codebase";
+export interface GitRepoLink {
+  id: number; product_id: number; provider: GitProvider; repo: string;
+  role: GitRepoRole; component_name: string; tag_pattern: string;
+  web_url: string; chart_path: string; created_at: string;
+}
+export interface GitRepoLinkCreate {
+  provider: GitProvider; repo: string; role: GitRepoRole;
+  component_name?: string; tag_pattern?: string; web_url?: string; chart_path?: string;
+}
+export const listGitRepos = (productId: number) =>
+  api.get<GitRepoLink[]>(`/api/v1/product/${productId}/git-repos`).then((r) => r.data);
+export const addGitRepo = (productId: number, body: GitRepoLinkCreate) =>
+  api.post<GitRepoLink>(`/api/v1/product/${productId}/git-repos`, body).then((r) => r.data);
+export const updateGitRepo = (
+  productId: number, linkId: number, patch: Partial<GitRepoLinkCreate>
+) =>
+  api
+    .patch<GitRepoLink>(`/api/v1/product/${productId}/git-repos/${linkId}`, patch)
+    .then((r) => r.data);
+export const deleteGitRepo = (productId: number, linkId: number) =>
+  api.delete(`/api/v1/product/${productId}/git-repos/${linkId}`).then((r) => r.data);
+
+// --- Release code changes (read live from the git hosting) --------------------
+export interface CommitView {
+  sha: string; short_sha: string; subject: string; author: string; url: string;
+  tickets: string[];  // empty = unmapped (reported, never guessed)
+}
+export type ComponentChangeStatus = "changed" | "added" | "removed" | "unchanged" | "error";
+export interface ComponentChange {
+  name: string; repo_id: number | null; repo: string; provider: string;
+  web_url: string;
+  old_version: string | null; new_version: string | null;
+  status: ComponentChangeStatus;
+  error: string;         // why the component's diff could not be produced
+  compare_url: string;
+  commit_count: number; commits_truncated: boolean; commits: CommitView[];
+  mapped_count: number; unmapped_count: number;
+}
+export interface UnmatchedDependency {
+  name: string; old_version: string | null; new_version: string | null;
+}
+export interface ReleaseChanges {
+  release_id: number; version: string;
+  previous_release_id: number | null; previous_version: string | null;
+  // "umbrella": Chart.yaml diffed between release tags, then each service.
+  // "single-repo": the one codebase repo diffed directly between release tags.
+  mode: "umbrella" | "single-repo";
+  // The anchor repo: the umbrella chart, or the codebase repo in single-repo mode.
+  umbrella_repo: string; umbrella_provider: string;
+  old_tag: string | null; new_tag: string | null;
+  baseline_missing: string;  // why there is no baseline ("" when there is one)
+  components: ComponentChange[];
+  unmatched_dependencies: UnmatchedDependency[];
+  library_repos: GitRepoLink[];
+}
+export const getReleaseChanges = (releaseId: number) =>
+  api.get<ReleaseChanges>(`/api/v1/release/${releaseId}/changes`).then((r) => r.data);
+// Run the advisory AI code review; the report lands as a DRAFT
+// "Code Review Report" document on the release. Slow (one LLM pass per
+// changed component).
+export const runCodeReview = (releaseId: number) =>
+  api.post<DocumentMeta>(`/api/v1/release/${releaseId}/code-review`).then((r) => r.data);
+
 // --- LLM assistant (chat) --------------------------------------------------
 export interface ChatMessage { role: "user" | "assistant"; content: string }
 export interface ChatAction { tool: string; ok: boolean; summary: string }
@@ -413,13 +492,30 @@ export interface ChatDocumentRef {
 }
 export interface ChatResponse {
   reply: string; actions: ChatAction[]; documents: ChatDocumentRef[];
+  // Attachments the assistant linked to a document this turn — they are spent,
+  // so the client stops sending them.
+  linked_attachment_ids: number[];
 }
 
-// Send the full conversation so far; the backend runs the agentic tool loop and
-// returns the assistant's reply plus the actions it performed. Stateless: the
-// client owns the transcript.
-export const sendChat = (messages: ChatMessage[]) =>
-  api.post<ChatResponse>("/api/v1/chat", { messages }).then((r) => r.data);
+// A file the operator attached in the chat. It is staged server-side and shown
+// to the assistant as metadata only; it reaches a release only once the
+// assistant links it to a document (after confirming with the operator).
+export interface ChatAttachment {
+  id: number; filename: string; content_type: string; size: number;
+}
+export const uploadChatAttachment = (file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api.post<ChatAttachment>("/api/v1/chat/attachments", form).then((r) => r.data);
+};
+
+// Send the full conversation so far, plus the ids of any attached files not yet
+// linked; the backend runs the agentic tool loop and returns the assistant's
+// reply plus the actions it performed. Stateless: the client owns the transcript.
+export const sendChat = (messages: ChatMessage[], attachmentIds: number[] = []) =>
+  api
+    .post<ChatResponse>("/api/v1/chat", { messages, attachment_ids: attachmentIds })
+    .then((r) => r.data);
 
 // What the assistant can do — its actions (from the live tool registry) and
 // ready-to-use prompt templates for its main jobs.

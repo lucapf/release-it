@@ -14,14 +14,17 @@ from __future__ import annotations
 import logging
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 
+from app.core.config import settings
 from app.core.identity import Principal, current_principal
 from app.db.pool import get_conn
 from app.integrations.llm_chat import SYSTEM_PROMPT, get_chat_service
+from app.repositories import chat_attachments as attachments_repo
 from app.schemas.models import (
     AssistantCapabilities,
     ChatAction,
+    ChatAttachment,
     ChatDocumentRef,
     ChatRequest,
     ChatResponse,
@@ -43,6 +46,41 @@ def capabilities(conn: psycopg.Connection = Depends(get_conn)):
         actions=assistant.describe_actions(),
         prompts=assistant.effective_prompts(appconfig.prompt_overrides(conn)),
     )
+
+
+@router.post("/attachments", response_model=ChatAttachment, status_code=201)
+async def upload_attachment(
+    file: UploadFile = File(...),
+    conn: psycopg.Connection = Depends(get_conn),
+    principal: Principal = Depends(current_principal),
+):
+    """Stage a file the operator attached in the chat.
+
+    The chat transcript carries text only, so the bytes cannot ride along in it.
+    They are held here instead and the assistant is shown only the metadata this
+    returns; it works out which release/document the file belongs to, confirms
+    with the operator, and links it with the ``attachment_id``. Nothing is
+    attached to a release until that happens — an attachment the operator never
+    links is purged after ``chat_attachments.TTL_HOURS``.
+    """
+    content = await file.read()
+    limit = settings.max_document_size_mb * 1024 * 1024
+    if len(content) > limit:
+        raise HTTPException(
+            413,
+            f"The file exceeds the maximum allowed size of {settings.max_document_size_mb} MB",
+        )
+    if not content:
+        raise HTTPException(400, "The file is empty")
+    attachments_repo.purge_stale(conn)
+    row = attachments_repo.create(
+        conn,
+        file.filename or "attachment",
+        file.content_type or "application/octet-stream",
+        content,
+        principal.subject or None,
+    )
+    return ChatAttachment(**{k: row[k] for k in ("id", "filename", "content_type", "size")})
 
 
 @router.post("", response_model=ChatResponse)
@@ -78,6 +116,14 @@ def chat(
     prompts = assistant.effective_prompts(appconfig.prompt_overrides(conn))
     system = f"{SYSTEM_PROMPT}\n\n{assistant.render_job_playbook(prompts)}"
 
+    # Any files the operator has attached and not yet linked. The client resends
+    # their ids every turn; we only surface the ones it actually uploaded and has
+    # not spent, so a stale or borrowed id shows the model nothing.
+    pending = attachments_repo.pending(conn, body.attachment_ids, principal.subject or None)
+    attachment_context = assistant.render_attachment_context(conn, pending)
+    if attachment_context:
+        system = f"{system}\n\n{attachment_context}"
+
     try:
         result = service.run(
             system=system, history=history, tools=tools, dispatch=dispatch
@@ -100,4 +146,8 @@ def chat(
         reply=result.reply,
         actions=[ChatAction(tool=a.tool, ok=a.ok, summary=a.summary) for a in result.actions],
         documents=list(documents.values()),
+        # Read back from the staging table rather than from the tool results: it is
+        # the table that decides whether an attachment was really spent, so the UI
+        # can never keep resending a file that has already become a document.
+        linked_attachment_ids=attachments_repo.linked_ids(conn, body.attachment_ids),
     )

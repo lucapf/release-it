@@ -20,6 +20,10 @@ rules:
   - { path: "/api/v1/product",   methods: ["POST"],   roles: ["Developer", "Release Manager", "Administrator"] }
   - { path: "/api/v1/product/*", methods: ["PATCH"],  roles: ["Developer", "Release Manager", "Administrator"] }
   - { path: "/api/v1/product/*", methods: ["DELETE"], roles: ["Administrator"] }
+  # Git repository links (a product sub-resource, so the single-segment rules
+  # above don't match) — configured by Administrators.
+  - { path: "/api/v1/product/*/git-repos",   methods: ["POST"], roles: ["Administrator"] }
+  - { path: "/api/v1/product/*/git-repos/*", methods: ["PATCH", "DELETE"], roles: ["Administrator"] }
 
   # --- Releases ------------------------------------------------------------
   - { path: "/api/v1/release",                   methods: ["POST"],   roles: ["Developer", "Release Manager", "Administrator"] }
@@ -38,6 +42,10 @@ rules:
   #     caller's behalf, so the per-action RBAC (transition roles, etc.) is
   #     re-enforced by the backend on each tool it calls. --------------------
   - { path: "/api/v1/chat", methods: ["POST"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }
+  # Staging a file the operator attached in the chat. It is not attached to any
+  # release yet — the assistant links it to a document only after the operator
+  # confirms, and that link goes through the tool RBAC like every other action.
+  - { path: "/api/v1/chat/attachments", methods: ["POST"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }
 
   # --- Reads: any authenticated ReleaseIT role -----------------------------
   - { path: "/api/v1/**", methods: ["GET"], roles: ["Developer", "QA Manager", "Release Manager", "Administrator"] }

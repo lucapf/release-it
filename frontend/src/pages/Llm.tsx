@@ -11,6 +11,7 @@ import {
   Loader,
   PasswordInput,
   SegmentedControl,
+  Select,
   SimpleGrid,
   Stack,
   Text,
@@ -33,6 +34,16 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { notifyApiError } from "../lib/errors";
 
+// The Claude models an operator picks from. Anthropic's ids are not a uniform
+// pattern (the tier and its version move independently), so the tier the operator
+// thinks in is mapped to the exact id the API expects — picking "Sonnet" stores
+// "claude-sonnet-5". Update these ids when moving to a newer generation.
+const CLAUDE_MODELS = [
+  { value: "claude-haiku-4-5", label: "Haiku — fastest, cheapest" },
+  { value: "claude-sonnet-5", label: "Sonnet — balanced" },
+  { value: "claude-opus-4-8", label: "Opus — most capable" },
+];
+
 // --- LLM engine configuration ----------------------------------------------
 // Standalone page: the LLM engine used to draft release notes from tracked
 // issues. Split out of the main Configuration page into its own route.
@@ -53,6 +64,17 @@ function LLMSection({ canEdit }: { canEdit: boolean }) {
     setOllamaUrl(cfg.llm.ollama.base_url);
     setOllamaModel(cfg.llm.ollama.model);
   }, [cfg]);
+
+  // A model id configured before this list existed (or set straight in the env)
+  // is kept as an option rather than silently rewritten to one of the three —
+  // opening this page must not change what the engine is running on.
+  const modelOptions = useMemo(
+    () =>
+      claudeModel && !CLAUDE_MODELS.some((m) => m.value === claudeModel)
+        ? [...CLAUDE_MODELS, { value: claudeModel, label: `${claudeModel} (currently configured)` }]
+        : CLAUDE_MODELS,
+    [claudeModel],
+  );
 
   const save = useMutation({
     mutationFn: () => {
@@ -105,12 +127,15 @@ function LLMSection({ canEdit }: { canEdit: boolean }) {
       <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
         <Stack gap="sm">
           <Text fw={600}>Claude</Text>
-          <TextInput
+          <Select
             label="Model"
-            placeholder="claude-opus-4-8"
-            value={claudeModel}
-            onChange={(e) => setClaudeModel(e.currentTarget.value)}
+            placeholder="Select a model"
+            data={modelOptions}
+            value={claudeModel || null}
+            onChange={(v) => v && setClaudeModel(v)}
+            allowDeselect={false}
             disabled={!canEdit}
+            description={claudeModel ? `Stored as ${claudeModel}` : undefined}
           />
           <PasswordInput
             label="API key"

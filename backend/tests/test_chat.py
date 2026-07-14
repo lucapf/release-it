@@ -178,9 +178,10 @@ def test_describe_actions_covers_every_tool_and_flags_writes():
     assert described["list_products"]["kind"] == "read"
 
 
-def test_prompt_templates_cover_the_three_assistant_jobs():
+def test_prompt_templates_cover_the_assistant_jobs():
     prompts = {p["key"]: p for p in assistant.PROMPT_TEMPLATES}
-    assert set(prompts) == {"generate_document", "release_status", "advance_workflow"}
+    assert set(prompts) == {"generate_document", "release_status", "advance_workflow",
+                            "code_review"}
     for p in prompts.values():
         assert p["title"] and p["description"] and p["prompt"]
     # The generate-document job is generic: it verifies the type, then uploads.

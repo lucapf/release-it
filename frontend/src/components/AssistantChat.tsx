@@ -5,20 +5,26 @@ import {
   Badge,
   Box,
   Button,
+  FileButton,
   Group,
+  Loader,
   Paper,
+  Pill,
   ScrollArea,
   Stack,
   Text,
   Textarea,
   ThemeIcon,
+  Tooltip,
   TypographyStylesProvider,
 } from "@mantine/core";
 import {
   IconArrowUp,
   IconCheck,
+  IconFile,
   IconFileTypePdf,
   IconMarkdown,
+  IconPaperclip,
   IconRobot,
   IconTool,
   IconUser,
@@ -27,10 +33,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ChatAction,
+  ChatAttachment,
   ChatDocumentRef,
   ChatMessage,
   downloadDocumentVersion,
   sendChat,
+  uploadChatAttachment,
 } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { notifyApiError } from "../lib/errors";
@@ -61,8 +69,27 @@ function AssistantMarkdown({ content }: { content: string }) {
 }
 
 // One rendered turn: the wire message plus, for assistant turns, the tools it ran
-// and any documents it surfaced for download.
-type Turn = ChatMessage & { actions?: ChatAction[]; documents?: ChatDocumentRef[] };
+// and any documents it surfaced for download; for operator turns, the files sent
+// with it.
+type Turn = ChatMessage & {
+  actions?: ChatAction[];
+  documents?: ChatDocumentRef[];
+  attachments?: ChatAttachment[];
+};
+
+// The extension of a stored version's file, used to label its download button —
+// a document's original may be Markdown, a PDF, or anything the operator
+// attached, so the button can't assume one format.
+function extensionOf(filename: string): string {
+  const parts = filename.split(".");
+  return parts.length > 1 ? (parts.pop() as string).toLowerCase() : "";
+}
+
+function formatIcon(ext: string, size = 14) {
+  if (ext === "md" || ext === "markdown") return <IconMarkdown size={size} />;
+  if (ext === "pdf") return <IconFileTypePdf size={size} />;
+  return <IconFile size={size} />;
+}
 
 // A document the assistant surfaced — rendered as authenticated download buttons
 // (Markdown to edit, PDF to read), reusing the same token-aware download the
@@ -77,6 +104,9 @@ function DocumentCard({ doc }: { doc: ChatDocumentRef }) {
     onError: (e: any) => notifyApiError(e, "Download failed"),
   });
   const approved = doc.status === "APPROVED";
+  // The original may be Markdown the assistant wrote or any file the operator
+  // attached, so label its button from the stored file name rather than assuming.
+  const ext = extensionOf(doc.filename);
   return (
     <Paper withBorder radius="md" px="sm" py="xs">
       <Group justify="space-between" wrap="nowrap" gap="sm">
@@ -96,12 +126,14 @@ function DocumentCard({ doc }: { doc: ChatDocumentRef }) {
           <Button
             size="compact-xs"
             variant="light"
-            leftSection={<IconMarkdown size={14} />}
+            color={ext === "pdf" ? "red" : "indigo"}
+            leftSection={formatIcon(ext)}
             loading={dl.isPending}
             onClick={() => dl.mutate(undefined)}
           >
-            .md
+            {ext ? `.${ext}` : "file"}
           </Button>
+          {/* The rendered-PDF companion, only ever generated for Markdown sources. */}
           {doc.has_pdf && (
             <Button
               size="compact-xs"
@@ -171,13 +203,21 @@ function MessageBubble({ turn }: { turn: Turn }) {
         >
           {isUser ? (
             // The operator's own text is plain — render verbatim, keeping newlines.
-            <Text
-              size="sm"
-              c="white"
-              style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}
-            >
-              {turn.content}
-            </Text>
+            <Stack gap={6}>
+              <Text
+                size="sm"
+                c="white"
+                style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+              >
+                {turn.content}
+              </Text>
+              {turn.attachments?.map((a) => (
+                <Group key={a.id} gap={4} wrap="nowrap">
+                  <IconPaperclip size={13} color="white" />
+                  <Text size="xs" c="white" truncate>{a.filename}</Text>
+                </Group>
+              ))}
+            </Stack>
           ) : (
             <AssistantMarkdown content={turn.content} />
           )}
@@ -205,31 +245,61 @@ export function AssistantChat() {
   const { user } = useAuth();
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
+  // Files the operator has attached that the assistant has not yet linked to a
+  // document. They are uploaded (staged) as soon as they're picked, and resent on
+  // every turn — the backend is stateless — until it reports them linked.
+  const [pending, setPending] = useState<ChatAttachment[]>([]);
   const viewport = useRef<HTMLDivElement>(null);
+  const resetFileInput = useRef<() => void>(null);
 
   const scrollToBottom = () =>
     viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: "smooth" });
   useEffect(scrollToBottom, [turns]);
 
+  const upload = useMutation({
+    mutationFn: (file: File) => uploadChatAttachment(file),
+    onSuccess: (a) => setPending((p) => [...p, a]),
+    onError: (e: any) => notifyApiError(e, "Could not attach the file"),
+    onSettled: () => resetFileInput.current?.(),
+  });
+
   const chat = useMutation({
-    // Send the whole transcript (roles + content only) so the backend stays stateless.
-    mutationFn: (history: Turn[]) =>
-      sendChat(history.map(({ role, content }) => ({ role, content }))),
-    onSuccess: (res) =>
+    // Send the whole transcript (roles + content only) plus the still-unlinked
+    // attachments, so the backend stays stateless.
+    mutationFn: ({ history, attachments }: { history: Turn[]; attachments: ChatAttachment[] }) =>
+      sendChat(
+        history.map(({ role, content }) => ({ role, content })),
+        attachments.map((a) => a.id),
+      ),
+    onSuccess: (res) => {
       setTurns((t) => [
         ...t,
         { role: "assistant", content: res.reply, actions: res.actions, documents: res.documents },
-      ]),
+      ]);
+      // Linked files are spent: they are documents now, so stop offering them.
+      const linked = new Set(res.linked_attachment_ids);
+      setPending((p) => p.filter((a) => !linked.has(a.id)));
+    },
     onError: (e: any) => notifyApiError(e, "The assistant couldn't respond"),
   });
 
   const send = (text: string) => {
-    const content = text.trim();
-    if (!content || chat.isPending) return;
-    const next: Turn[] = [...turns, { role: "user", content }];
+    const typed = text.trim();
+    // A file on its own is a valid turn — but the model needs a non-empty message
+    // with it, so state plainly what the operator did.
+    const content =
+      typed ||
+      (pending.length
+        ? `I've attached ${pending.map((a) => a.filename).join(", ")}.`
+        : "");
+    if (!content || chat.isPending || upload.isPending) return;
+    const next: Turn[] = [
+      ...turns,
+      { role: "user", content, attachments: pending.length ? pending : undefined },
+    ];
     setTurns(next);
     setInput("");
-    chat.mutate(next);
+    chat.mutate({ history: next, attachments: pending });
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -241,6 +311,7 @@ export function AssistantChat() {
   };
 
   const empty = turns.length === 0;
+  const canSend = Boolean(input.trim() || pending.length);
 
   return (
     <Paper
@@ -293,8 +364,31 @@ export function AssistantChat() {
       </ScrollArea>
 
       <Box p="sm" style={{ borderTop: "1px solid var(--mantine-color-default-border)" }}>
+        {/* Attached-but-unlinked files. They stay here across turns — the
+            assistant asks which document they belong to, and they disappear once
+            it has linked them. Removing one here simply stops sending it. */}
+        {pending.length > 0 && (
+          <Group gap={6} mb="xs">
+            {pending.map((a) => (
+              <Pill
+                key={a.id}
+                withRemoveButton
+                disabled={chat.isPending}
+                onRemove={() => setPending((p) => p.filter((x) => x.id !== a.id))}
+              >
+                <Group gap={4} wrap="nowrap" component="span">
+                  <IconPaperclip size={12} />
+                  {a.filename}
+                </Group>
+              </Pill>
+            ))}
+            <Text size="xs" c="dimmed">
+              waiting to be linked to a document
+            </Text>
+          </Group>
+        )}
         <Textarea
-          placeholder="Ask about releases, or tell the assistant what to do… (Enter to send, Shift+Enter for a new line)"
+          placeholder="Ask about releases, attach a document, or tell the assistant what to do… (Enter to send, Shift+Enter for a new line)"
           autosize
           minRows={1}
           maxRows={6}
@@ -302,6 +396,26 @@ export function AssistantChat() {
           onChange={(e) => setInput(e.currentTarget.value)}
           onKeyDown={onKeyDown}
           disabled={chat.isPending}
+          leftSection={
+            <FileButton onChange={(f) => f && upload.mutate(f)} resetRef={resetFileInput}>
+              {(props) => (
+                <Tooltip label="Attach a document">
+                  <ActionIcon
+                    {...props}
+                    variant="subtle"
+                    color="gray"
+                    radius="xl"
+                    size="lg"
+                    aria-label="Attach a document"
+                    disabled={chat.isPending}
+                  >
+                    {upload.isPending ? <Loader size={16} /> : <IconPaperclip size={18} />}
+                  </ActionIcon>
+                </Tooltip>
+              )}
+            </FileButton>
+          }
+          leftSectionWidth={48}
           rightSection={
             <ActionIcon
               variant="filled"
@@ -310,13 +424,14 @@ export function AssistantChat() {
               size="lg"
               aria-label="Send"
               loading={chat.isPending}
-              disabled={!input.trim()}
+              disabled={!canSend || upload.isPending}
               onClick={() => send(input)}
             >
               <IconArrowUp size={18} />
             </ActionIcon>
           }
           rightSectionWidth={52}
+          styles={{ input: { paddingLeft: 48 } }}
         />
       </Box>
     </Paper>

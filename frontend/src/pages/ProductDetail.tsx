@@ -49,6 +49,9 @@ import {
   IconTrash,
   IconUpload,
   IconBrandGithub,
+  IconBrandGitlab,
+  IconGitBranch,
+  IconPencil,
 } from "@tabler/icons-react";
 import {
   getProduct,
@@ -73,12 +76,21 @@ import {
   getIssueFilter,
   saveIssueFilter,
   getReleaseHistory,
+  listGitRepos,
+  addGitRepo,
+  updateGitRepo,
+  deleteGitRepo,
+  getReleaseChanges,
   Issue,
   IssueFilter,
   IssueFilterMode,
   Product,
   Release,
   AuditEntry,
+  ComponentChange,
+  GitRepoLink,
+  GitRepoLinkCreate,
+  GitRepoRole,
 } from "../api/client";
 import { ReleaseStatusCard } from "../components/ReleaseStatusCard";
 import { EmptyState } from "../components/EmptyState";
@@ -1315,6 +1327,378 @@ function HistoryTab({ releaseId }: { releaseId: number }) {
 }
 
 // --- Page ------------------------------------------------------------------
+// --- Components & repositories ----------------------------------------------
+// One row per linked git repository. For components, the version column shows
+// what the selected release ships (moduleX 1.0.1 → 1.1.0), read live from the
+// umbrella chart's tags. A hosting that could not be asked shows its error —
+// it must never look like "no changes".
+
+const ROLE_COLOR: Record<GitRepoRole, string> = {
+  deployment: "grape",
+  codebase: "teal",
+  component: "blue",
+  library: "gray",
+};
+
+// The name change detection gives the single component of a codebase repo.
+const codebaseName = (r: GitRepoLink) =>
+  r.component_name || r.repo.split("/").pop() || r.repo;
+
+function ProviderIcon({ provider }: { provider: string }) {
+  return provider === "gitlab" ? <IconBrandGitlab size={16} /> : <IconBrandGithub size={16} />;
+}
+
+function VersionChange({ change }: { change: ComponentChange | undefined }) {
+  if (!change) return <Text size="sm" c="dimmed">—</Text>;
+  if (change.status === "error") {
+    return (
+      <Tooltip label={change.error} multiline w={320}>
+        <Badge color="red" variant="light">could not diff</Badge>
+      </Tooltip>
+    );
+  }
+  if (change.status === "added") {
+    return <Text size="sm" c="teal">new in this release ({change.new_version})</Text>;
+  }
+  if (change.status === "removed") {
+    return <Text size="sm" c="dimmed">removed (was {change.old_version})</Text>;
+  }
+  if (change.status === "changed") {
+    return (
+      <Group gap={6} wrap="nowrap">
+        <Text size="sm" c="dimmed">{change.old_version}</Text>
+        <Text size="sm" c="dimmed">→</Text>
+        <Text size="sm" fw={600} c="teal">{change.new_version}</Text>
+        {change.commit_count > 0 && (
+          <Text size="xs" c="dimmed">
+            ({change.commit_count} commit{change.commit_count === 1 ? "" : "s"})
+          </Text>
+        )}
+      </Group>
+    );
+  }
+  return <Text size="sm">{change.new_version}</Text>;
+}
+
+const EMPTY_REPO_FORM: GitRepoLinkCreate = {
+  provider: "github", repo: "", role: "component",
+  component_name: "", tag_pattern: "v{version}", web_url: "", chart_path: "Chart.yaml",
+};
+
+function GitRepoModal({
+  productId,
+  editing,
+  opened,
+  onClose,
+}: {
+  productId: number;
+  editing: GitRepoLink | null;
+  opened: boolean;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [form, setForm] = useState<GitRepoLinkCreate>(EMPTY_REPO_FORM);
+  useEffect(() => {
+    setForm(editing ? {
+      provider: editing.provider, repo: editing.repo, role: editing.role,
+      component_name: editing.component_name, tag_pattern: editing.tag_pattern,
+      web_url: editing.web_url, chart_path: editing.chart_path,
+    } : EMPTY_REPO_FORM);
+  }, [editing, opened]);
+
+  const set = (patch: Partial<GitRepoLinkCreate>) => setForm((f) => ({ ...f, ...patch }));
+
+  const save = useMutation({
+    mutationFn: () =>
+      editing ? updateGitRepo(productId, editing.id, form) : addGitRepo(productId, form),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["git-repos", productId] });
+      qc.invalidateQueries({ queryKey: ["release-changes"] });
+      notifications.show({
+        message: editing ? "Repository updated" : "Repository linked",
+        color: "teal",
+      });
+      onClose();
+    },
+    // The backend verifies the repo against the hosting before saving; its
+    // message says exactly what failed (unknown repo, connection not set up…).
+    onError: (e: any) => notifyApiError(e, "Could not save the repository link"),
+  });
+
+  return (
+    <Modal
+      opened={opened}
+      onClose={onClose}
+      title={editing ? "Edit repository link" : "Link a repository"}
+    >
+      <Stack gap="sm">
+        <SegmentedControl
+          data={[{ value: "github", label: "GitHub" }, { value: "gitlab", label: "GitLab" }]}
+          value={form.provider}
+          onChange={(v) => set({ provider: v as GitRepoLinkCreate["provider"] })}
+        />
+        <TextInput
+          label="Repository"
+          placeholder={form.provider === "github" ? "owner/repo" : "group/project"}
+          value={form.repo}
+          onChange={(e) => set({ repo: e.currentTarget.value })}
+          required
+        />
+        <Select
+          label="Role"
+          data={[
+            { value: "component", label: "Component (a service in the umbrella chart)" },
+            { value: "library", label: "Library (linked for reference only)" },
+            { value: "deployment", label: "Deployment (the Helm umbrella chart)" },
+            { value: "codebase", label: "Codebase (simple product: the whole code in one repo)" },
+          ]}
+          value={form.role}
+          onChange={(v) => set({ role: (v as GitRepoRole) ?? "component" })}
+          allowDeselect={false}
+        />
+        {form.role === "codebase" && (
+          <Text size="xs" c="dimmed">
+            The repository is tagged with the product release version; each release
+            is diffed directly against the previous one's tag.
+          </Text>
+        )}
+        {form.role === "component" && (
+          <TextInput
+            label="Component name"
+            description="The dependency name this service appears under in the umbrella Chart.yaml."
+            value={form.component_name}
+            onChange={(e) => set({ component_name: e.currentTarget.value })}
+            required
+          />
+        )}
+        {form.role === "deployment" && (
+          <TextInput
+            label="Chart path"
+            description="Where the umbrella Chart.yaml lives inside the repository."
+            value={form.chart_path}
+            onChange={(e) => set({ chart_path: e.currentTarget.value })}
+          />
+        )}
+        <TextInput
+          label="Tag pattern"
+          description="How a version becomes a tag in this repository ({version} is replaced)."
+          value={form.tag_pattern}
+          onChange={(e) => set({ tag_pattern: e.currentTarget.value })}
+        />
+        <TextInput
+          label="Web URL (optional)"
+          description="Normally derived from the provider (e.g. github.com/owner/repo) — set it only to link somewhere else."
+          placeholder="derived automatically"
+          value={form.web_url}
+          onChange={(e) => set({ web_url: e.currentTarget.value })}
+        />
+        <Group justify="flex-end" mt="sm">
+          <Button variant="default" onClick={onClose}>Cancel</Button>
+          <Button loading={save.isPending} onClick={() => save.mutate()}>
+            {editing ? "Save" : "Link repository"}
+          </Button>
+        </Group>
+      </Stack>
+    </Modal>
+  );
+}
+
+function ComponentsTab({
+  productId,
+  releaseId,
+}: {
+  productId: number;
+  releaseId: number | null;
+}) {
+  const { hasRole } = useAuth();
+  const canEdit = hasRole("Administrator");
+  const qc = useQueryClient();
+
+  const { data: repos = [], isLoading } = useQuery({
+    queryKey: ["git-repos", productId],
+    queryFn: () => listGitRepos(productId),
+  });
+  // The version anchor: the umbrella chart, or the codebase repo of a simple
+  // single-repo product.
+  const hasAnchor = repos.some((r) => r.role === "deployment" || r.role === "codebase");
+
+  // The selected release's change-set. Only asked for once an anchor repo is
+  // linked (without one the answer is always "unavailable", not "no changes").
+  const changesQuery = useQuery({
+    queryKey: ["release-changes", releaseId],
+    queryFn: () => getReleaseChanges(releaseId!),
+    enabled: releaseId != null && hasAnchor,
+    retry: false,
+  });
+  const changes = changesQuery.data;
+  const byComponent = useMemo(() => {
+    const map = new Map<string, ComponentChange>();
+    changes?.components.forEach((c) => map.set(c.name, c));
+    return map;
+  }, [changes]);
+
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState<GitRepoLink | null>(null);
+
+  const remove = useMutation({
+    mutationFn: (linkId: number) => deleteGitRepo(productId, linkId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["git-repos", productId] });
+      qc.invalidateQueries({ queryKey: ["release-changes"] });
+      notifications.show({ message: "Repository unlinked", color: "teal" });
+    },
+    onError: (e: any) => notifyApiError(e, "Could not unlink the repository"),
+  });
+
+  if (isLoading) return <Loader />;
+
+  return (
+    <Stack gap="md">
+      {repos.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={IconGitBranch}
+            title="No repositories linked"
+            description="Link the product's git repositories: one per component, plus the Helm umbrella chart as the deployment repository."
+          />
+        </Card>
+      ) : (
+        <Card withBorder radius="md" padding="md">
+          {!hasAnchor && (
+            <Alert color="yellow" variant="light" mb="md">
+              No version-anchor repository is linked, so version changes cannot be
+              computed. Link the Helm umbrella chart (role "deployment") or, for a
+              simple single-repo product, the codebase (role "codebase").
+            </Alert>
+          )}
+          {changes?.baseline_missing && (
+            <Alert color="yellow" variant="light" mb="md">
+              {changes.baseline_missing}
+            </Alert>
+          )}
+          {changesQuery.error != null && (
+            <Alert color="red" variant="light" mb="md">
+              {apiErrorMessage(changesQuery.error, "Could not read the release's changes from the git hosting.")}
+            </Alert>
+          )}
+
+          <Table verticalSpacing="sm">
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Component</Table.Th>
+                <Table.Th>Role</Table.Th>
+                <Table.Th>Repository</Table.Th>
+                <Table.Th>Version</Table.Th>
+                {canEdit && <Table.Th w={90} />}
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {repos.map((r) => (
+                <Table.Tr key={r.id}>
+                  <Table.Td>
+                    <Text size="sm" fw={600}>
+                      {r.role === "component" ? r.component_name : r.repo.split("/").pop()}
+                    </Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Badge color={ROLE_COLOR[r.role as GitRepoRole] ?? "gray"} variant="light">
+                      {r.role}
+                    </Badge>
+                  </Table.Td>
+                  <Table.Td>
+                    <Group gap={6} wrap="nowrap">
+                      <ProviderIcon provider={r.provider} />
+                      {r.web_url ? (
+                        <Anchor href={r.web_url} target="_blank" size="sm">
+                          {r.repo} <IconExternalLink size={12} />
+                        </Anchor>
+                      ) : (
+                        <Text size="sm">{r.repo}</Text>
+                      )}
+                    </Group>
+                  </Table.Td>
+                  <Table.Td>
+                    {r.role === "component" ? (
+                      <VersionChange change={byComponent.get(r.component_name)} />
+                    ) : r.role === "codebase" ? (
+                      <VersionChange change={byComponent.get(codebaseName(r))} />
+                    ) : r.role === "deployment" ? (
+                      <Text size="sm" c="dimmed">
+                        {changes?.new_tag ? `tag ${changes.new_tag}` : "—"}
+                      </Text>
+                    ) : (
+                      <Text size="sm" c="dimmed">—</Text>
+                    )}
+                  </Table.Td>
+                  {canEdit && (
+                    <Table.Td>
+                      <Group gap={4} wrap="nowrap" justify="flex-end">
+                        <Tooltip label="Edit link">
+                          <ActionIcon
+                            variant="subtle"
+                            onClick={() => { setEditing(r); setModalOpen(true); }}
+                          >
+                            <IconPencil size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label="Unlink">
+                          <ActionIcon
+                            variant="subtle"
+                            color="red"
+                            loading={remove.isPending && remove.variables === r.id}
+                            onClick={() => remove.mutate(r.id)}
+                          >
+                            <IconTrash size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
+                    </Table.Td>
+                  )}
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+
+          {changes && changes.unmatched_dependencies.length > 0 && (
+            <Alert color="orange" variant="light" mt="md">
+              <Text size="sm" fw={600} mb={4}>
+                Chart.yaml dependencies with no linked repository:
+              </Text>
+              {changes.unmatched_dependencies.map((d) => (
+                <Text size="sm" key={d.name}>
+                  {d.name}{" "}
+                  {d.old_version !== d.new_version
+                    ? `(${d.old_version ?? "new"} → ${d.new_version ?? "removed"})`
+                    : `(${d.new_version})`}
+                </Text>
+              ))}
+            </Alert>
+          )}
+        </Card>
+      )}
+
+      {canEdit && (
+        <Group>
+          <Button
+            leftSection={<IconPlus size={16} />}
+            variant="light"
+            onClick={() => { setEditing(null); setModalOpen(true); }}
+          >
+            Link repository
+          </Button>
+        </Group>
+      )}
+
+      <GitRepoModal
+        productId={productId}
+        editing={editing}
+        opened={modalOpen}
+        onClose={() => setModalOpen(false)}
+      />
+    </Stack>
+  );
+}
+
 export function ProductDetailPage() {
   const { productId } = useParams();
   const [searchParams] = useSearchParams();
@@ -1417,6 +1801,7 @@ export function ProductDetailPage() {
           <Tabs.Tab value="overview" leftSection={<IconClipboardText size={16} />}>Overview</Tabs.Tab>
           <Tabs.Tab value="documents" leftSection={<IconFiles size={16} />}>Documents</Tabs.Tab>
           <Tabs.Tab value="issues" leftSection={<IconListDetails size={16} />}>Issues</Tabs.Tab>
+          <Tabs.Tab value="components" leftSection={<IconGitBranch size={16} />}>Components</Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<IconHistory size={16} />}>History</Tabs.Tab>
         </Tabs.List>
 
@@ -1440,6 +1825,10 @@ export function ProductDetailPage() {
           ) : (
             needsRelease("see its tickets")
           )}
+        </Tabs.Panel>
+
+        <Tabs.Panel value="components" pt="md">
+          <ComponentsTab productId={id} releaseId={activeId} />
         </Tabs.Panel>
 
         <Tabs.Panel value="history" pt="md">

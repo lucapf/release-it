@@ -594,6 +594,143 @@ function TrackerSection({ canEdit }: { canEdit: boolean }) {
   );
 }
 
+// --- Git hosting: connections to the source-repository providers ------------
+// Unlike trackers, both may be enabled at once: each linked repository names
+// its own provider, so one product's repos can span GitHub and GitLab. The
+// repositories themselves are linked per product, on the product page.
+function GitProvidersSection({ canEdit }: { canEdit: boolean }) {
+  const qc = useQueryClient();
+  const { data: cfg, isLoading } = useQuery({ queryKey: ["config"], queryFn: getConfig });
+
+  const [ghEnabled, setGhEnabled] = useState(false);
+  const [ghUrl, setGhUrl] = useState("");
+  const [ghToken, setGhToken] = useState("");
+  const [glEnabled, setGlEnabled] = useState(false);
+  const [glUrl, setGlUrl] = useState("");
+  const [glToken, setGlToken] = useState("");
+
+  useEffect(() => {
+    if (!cfg) return;
+    setGhEnabled(cfg.git.github.enabled);
+    setGhUrl(cfg.git.github.base_url);
+    setGlEnabled(cfg.git.gitlab.enabled);
+    setGlUrl(cfg.git.gitlab.base_url);
+  }, [cfg]);
+
+  const save = useMutation({
+    mutationFn: () => {
+      const body: ConfigUpdate = {
+        git_github_enabled: ghEnabled,
+        git_github_base_url: ghUrl,
+        git_gitlab_enabled: glEnabled,
+        git_gitlab_base_url: glUrl,
+      };
+      if (ghToken) body.git_github_token = ghToken; // write-only: blank = keep existing
+      if (glToken) body.git_gitlab_token = glToken;
+      return updateConfig(body);
+    },
+    onSuccess: (data) => {
+      qc.setQueryData(["config"], data);
+      setGhToken("");
+      setGlToken("");
+      notifications.show({ message: "Configuration saved", color: "teal" });
+    },
+    onError: (e: any) => notifyApiError(e, "Save failed"),
+  });
+
+  if (isLoading || !cfg) return <Loader />;
+
+  return (
+    <Card withBorder radius="md" padding="lg">
+      <Group justify="space-between" mb="md">
+        <div>
+          <Title order={4}>Git hosting</Title>
+          <Text c="dimmed" size="sm">
+            Connections to the services your source repositories live on. Both can be
+            enabled at once — each linked repository names its provider.
+          </Text>
+        </div>
+      </Group>
+
+      {!canEdit && (
+        <Alert color="gray" variant="light" mb="md">
+          You need the Administrator role to change these settings.
+        </Alert>
+      )}
+
+      <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={600}>GitHub</Text>
+            <Switch
+              checked={ghEnabled}
+              onChange={(e) => setGhEnabled(e.currentTarget.checked)}
+              label="Enabled"
+              disabled={!canEdit}
+            />
+          </Group>
+          <TextInput
+            label="API base URL"
+            placeholder="https://api.github.com"
+            value={ghUrl}
+            onChange={(e) => setGhUrl(e.currentTarget.value)}
+            disabled={!canEdit}
+          />
+          <PasswordInput
+            label="Access token"
+            placeholder={cfg.git.github.token_set ? "•••••••• (stored)" : "not set"}
+            value={ghToken}
+            onChange={(e) => setGhToken(e.currentTarget.value)}
+            disabled={!canEdit}
+            description="Leave blank to keep the current token."
+          />
+          <Text size="xs" c="dimmed">
+            Separate from the issue-tracker GitHub connection: tickets and code may
+            use different tokens (or different accounts).
+          </Text>
+        </Stack>
+
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={600}>GitLab</Text>
+            <Switch
+              checked={glEnabled}
+              onChange={(e) => setGlEnabled(e.currentTarget.checked)}
+              label="Enabled"
+              disabled={!canEdit}
+            />
+          </Group>
+          <TextInput
+            label="Instance URL"
+            placeholder="https://gitlab.example.com"
+            value={glUrl}
+            onChange={(e) => setGlUrl(e.currentTarget.value)}
+            disabled={!canEdit}
+          />
+          <PasswordInput
+            label="Access token"
+            placeholder={cfg.git.gitlab.token_set ? "•••••••• (stored)" : "not set"}
+            value={glToken}
+            onChange={(e) => setGlToken(e.currentTarget.value)}
+            disabled={!canEdit}
+            description="Leave blank to keep the current token."
+          />
+          <Text size="xs" c="dimmed">
+            The instance root, not the pipeline trigger URL — repositories are read
+            through its REST API.
+          </Text>
+        </Stack>
+      </SimpleGrid>
+
+      {canEdit && (
+        <Group justify="flex-end" mt="lg">
+          <Button loading={save.isPending} onClick={() => save.mutate()}>Save configuration</Button>
+        </Group>
+      )}
+    </Card>
+  );
+}
+
 // --- Document types: admin-managed supported document types ----------------
 // A manual/generated selector plus the conditional generation-prompt editor,
 // shared by the "add" form and the edit modal so both validate identically.
@@ -1214,6 +1351,7 @@ export const CONFIG_SECTIONS = [
   { path: "document-types", label: "Document types" },
   { path: "workflow", label: "Release workflow" },
   { path: "tracker", label: "Issue tracker" },
+  { path: "git", label: "Git hosting" },
   { path: "assistant-actions", label: "Assistant actions" },
   { path: "llm", label: "LLM engine" },
 ];
@@ -1275,6 +1413,18 @@ export function TrackerPage() {
   return (
     <ConfigPage title="Issue tracker" description="Configure how Release-It reaches your ticketing system.">
       <TrackerSection canEdit={hasRole("Administrator")} />
+    </ConfigPage>
+  );
+}
+
+export function GitHostingPage() {
+  const { hasRole } = useAuth();
+  return (
+    <ConfigPage
+      title="Git hosting"
+      description="Configure how Release-It reads your source repositories."
+    >
+      <GitProvidersSection canEdit={hasRole("Administrator")} />
     </ConfigPage>
   );
 }
